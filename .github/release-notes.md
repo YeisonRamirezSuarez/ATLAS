@@ -6,13 +6,13 @@
 | 🍎 macOS | **Jarvis.dmg** | Arrastra JARVIS a Aplicaciones. La primera vez: clic derecho → *Abrir*. |
 | 🐧 Linux | **Jarvis-linux.tar.gz** | `tar -xzf Jarvis-linux.tar.gz && ./Jarvis/install.sh` |
 
-Todo viene incluido: Python, librerías, Chromium y el modelo de la palabra de activación "Jarvis". Al abrirlo, pulsa ⚙ y pon tu clave de API (Gemini es gratis).
+Todo viene incluido: Python, librerías, Chromium y el modelo de la palabra de activación "Jarvis". Al abrirlo, pulsa **CONFIG** y pon tu clave de API (Gemini es gratis).
 
 Instrucciones completas en el [README](https://github.com/pablo29855/Jarvis-#readme).
 
 ## ✨ Novedades
 
-- 🧠 Cerebro Claude (API o suscripción Pro/Max) y elección de motor y modelo desde ⚙.
+- 🧠 Cerebro Claude (API o suscripción Pro/Max) y elección de motor y modelo desde CONFIG.
 - 👂 Palabra de activación "Jarvis" local, sin internet.
 - 🛰️ HUD de tareas en segundo plano: qué está haciendo cada tarea y en qué paso va.
 - 🌎 Siempre responde en el idioma en que le hablas, también en tareas en segundo plano.

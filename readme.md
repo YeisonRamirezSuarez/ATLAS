@@ -28,7 +28,7 @@ Todas las versiones: [Releases](https://github.com/pablo29855/Jarvis-/releases).
 > - **Windows:** si aparece SmartScreen, pulsa *Más información* → *Ejecutar de todas formas*.
 > - **macOS:** clic derecho sobre JARVIS → *Abrir* → *Abrir*.
 
-Al abrir JARVIS por primera vez, pulsa ⚙ y pon tus claves de API (ver [Motores y claves](#-motores-y-claves-de-api)).
+Al abrir JARVIS por primera vez, pulsa **CONFIG** y pon tus claves de API (ver [Motores y claves](#-motores-y-claves-de-api)).
 
 ---
 
@@ -53,7 +53,7 @@ Al abrir JARVIS por primera vez, pulsa ⚙ y pon tus claves de API (ver [Motores
 
 ## 🧠 Motores y claves de API
 
-El botón ⚙ abre el panel de ajustes. Elige el motor, el modelo y pon sus claves; JARVIS se reinicia con ellos. El panel izquierdo muestra el modelo activo y los tokens usados.
+El botón **CONFIG** (arriba a la derecha) abre el panel de ajustes. Elige el motor, el modelo y pon sus claves; JARVIS se reinicia con ellos. El panel izquierdo muestra el modelo activo y los tokens usados.
 
 | Motor | Qué necesitas |
 |---|---|

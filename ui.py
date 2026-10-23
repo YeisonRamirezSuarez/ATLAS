@@ -13,6 +13,7 @@ from pathlib import Path
 
 import psutil
 
+import autostart
 from config import PROVIDERS, VERSION, get_effort
 
 from PyQt6.QtCore import (
@@ -1232,7 +1233,7 @@ class _DropCanvas(QWidget):
 
 
 class SettingsOverlay(QWidget):
-    """AI engine and API keys. Shown at first boot and from the ⚙ button."""
+    """AI engine and API keys. Shown at first boot and from the CONFIG button."""
     done      = pyqtSignal(dict)
     cancelled = pyqtSignal()
 
@@ -1315,6 +1316,16 @@ class SettingsOverlay(QWidget):
                                   f" QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}")
         self._login.clicked.connect(self._sign_in)
         layout.addWidget(self._login)
+        layout.addSpacing(6)
+
+        # Applied on toggle: the login entry lives in the OS, not in api_keys.json.
+        self._autostart = QCheckBox("START WITH SYSTEM  ·  open JARVIS when you log in")
+        self._autostart.setFont(QFont(_FONT, 8))
+        self._autostart.setStyleSheet(f"QCheckBox {{ color: {C.TEXT}; background: transparent; }}")
+        self._autostart.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._autostart.setChecked(autostart.enabled())
+        self._autostart.toggled.connect(self._set_autostart)
+        layout.addWidget(self._autostart)
 
         self._err = _lbl("", 8, color=C.RED, align=Qt.AlignmentFlag.AlignCenter)
         layout.addStretch()
@@ -1365,6 +1376,13 @@ class SettingsOverlay(QWidget):
         threading.Thread(target=subscription_login, daemon=True).start()
         self._err.setText("Sign in with your Claude account in the browser, then SAVE & BOOT.")
 
+    def _set_autostart(self, on: bool):
+        try:
+            autostart.set_enabled(on)
+        except OSError as e:
+            self._err.setText(f"Start with system failed: {e}")
+            self._autostart.blockSignals(True); self._autostart.setChecked(not on); self._autostart.blockSignals(False)
+
     def _stash(self, p: str):
         key = PROVIDERS[p]["key"]
         if key not in (None, "gemini_api_key", "openrouter_api_key"):
@@ -1387,6 +1405,37 @@ class SettingsOverlay(QWidget):
             self._err.setText(f"{PROVIDERS[p]['label']} needs its API key.")
             return
         self.done.emit(cfg)
+
+
+class ConfigButton(QPushButton):
+    """Header button to the settings: chamfered outline, painted slider icon, CONFIG label."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(92, 30)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setToolTip("Engine, API keys and start with system")
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        col = qcol(C.PRI if self.underMouse() else C.PRI_DIM)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setBrush(QBrush(qcol(C.PRI_GHO if self.underMouse() else C.DARK)))
+        p.setPen(QPen(col, 1))
+        p.drawPolygon(_chamfer(r, 7))
+        # three sliders, knobs at different stops
+        cy, x0 = r.center().y(), 14
+        p.setPen(QPen(col, 1.4))
+        for dy, knob in ((-5, 4), (0, 10), (5, 6)):
+            p.drawLine(QPointF(x0, cy + dy), QPointF(x0 + 14, cy + dy))
+            p.setBrush(QBrush(col)); p.drawEllipse(QPointF(x0 + knob, cy + dy), 1.9, 1.9)
+        f = QFont(_FONT, 8, QFont.Weight.Bold)
+        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 2)
+        p.setFont(f)
+        p.drawText(QRectF(x0 + 22, 0, r.width() - x0 - 26, r.height()),
+                   Qt.AlignmentFlag.AlignCenter, "CONFIG")
 
 
 class HudPanel(QWidget):
@@ -1590,25 +1639,20 @@ class MainWindow(QMainWindow):
         lay.addLayout(mid)
         lay.addStretch()
 
-        gear = QPushButton("⚙")
-        gear.setToolTip("Engine & API keys")
-        gear.setFixedSize(34, 34)
-        gear.setFont(QFont(_FONT, 15))
-        gear.setCursor(Qt.CursorShape.PointingHandCursor)
-        gear.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {C.PRI_DIM};
-                           border: 1px solid {C.BORDER_A}; border-radius: 17px; }}
-            QPushButton:hover {{ color: {C.PRI}; border: 1px solid {C.PRI}; }}
-        """)
-        gear.clicked.connect(lambda: self._overlay or self._show_setup(can_cancel=True))
-        lay.addWidget(gear)
-        lay.addSpacing(10)
+        cfg_btn = ConfigButton()
+        cfg_btn.clicked.connect(lambda: self._overlay or self._show_setup(can_cancel=True))
+        lay.addWidget(cfg_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        lay.addSpacing(16)
 
         right_col = QVBoxLayout(); right_col.setSpacing(2)
         self._clock_lbl = QLabel("12:00:00 AM")
         self._clock_lbl.setFont(QFont(_FONT, 14, QFont.Weight.Bold))
         self._clock_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         self._clock_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        # Fixed width for the widest digits: proportional digits otherwise shift the CONFIG button every second.
+        fm = self._clock_lbl.fontMetrics()
+        self._clock_lbl.setFixedWidth(6 * max(fm.horizontalAdvance(d) for d in "0123456789")
+                                      + fm.horizontalAdvance(":: ") + max(map(fm.horizontalAdvance, ("AM", "PM"))) + 6)
         right_col.addWidget(self._clock_lbl)
         self._date_lbl = QLabel("")
         self._date_lbl.setFont(QFont(_FONT, 7))
@@ -1726,20 +1770,6 @@ class MainWindow(QMainWindow):
         self._tok_in = self._tok_out = 0
         lay.addWidget(ai_panel)
         lay.addStretch()
-
-        for txt, col in [
-            ("SEC\nCLEARED",        C.PRI),
-            ("PROTOCOL\nXXXVIII",   C.TEXT_DIM),
-        ]:
-            lbl = QLabel(txt)
-            lbl.setFont(QFont(_FONT, 7, QFont.Weight.Bold))
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet(
-                f"color: {col}; background: {C.PANEL2};"
-                f"border: 1px solid {C.BORDER_A}; border-radius: 3px; padding: 4px;"
-            )
-            lay.addWidget(lbl)
-
         return w
     def _build_right_panel(self) -> QWidget:
         w = HudPanel()
@@ -1985,7 +2015,9 @@ class MainWindow(QMainWindow):
         if self._ready:
             # The engine reads its config once at boot: restart the whole app.
             self._log.append_log("SYS: Config saved. Rebooting JARVIS...")
-            subprocess.Popen(sys.orig_argv, cwd=os.getcwd())
+            # sys.executable, not orig_argv[0]: under a uv venv that is the base python, without the
+            # venv's packages, so the new JARVIS died at `import numpy` and never came back.
+            subprocess.Popen([sys.executable, *sys.orig_argv[1:]], cwd=os.getcwd())
             QTimer.singleShot(300, lambda: os._exit(0))
             return
         self._ready = True

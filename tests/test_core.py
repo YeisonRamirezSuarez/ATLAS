@@ -281,5 +281,28 @@ class MainToolResultTests(unittest.TestCase):
         self.assertIn("task_status", names)
 
 
+class AutostartTests(unittest.TestCase):
+    def test_login_entry_written_and_removed_on_linux_and_mac(self):
+        import autostart
+        with tempfile.TemporaryDirectory() as d:
+            for os_name, attr in (("Linux", "_DESKTOP"), ("Darwin", "_PLIST")):
+                path = Path(d) / os_name / "entry"
+                with mock.patch.object(autostart, "_OS", os_name), mock.patch.object(autostart, attr, path):
+                    self.assertFalse(autostart.enabled())
+                    autostart.set_enabled(True)
+                    self.assertTrue(autostart.enabled())
+                    self.assertIn("jarvis.pyw", path.read_text(encoding="utf-8", errors="replace"))
+                    autostart.set_enabled(False)
+                    self.assertFalse(autostart.enabled())
+
+    def test_windows_prefers_installed_launcher(self):
+        import autostart
+        with tempfile.TemporaryDirectory() as d:
+            app = Path(d) / "app"; app.mkdir()
+            (Path(d) / "Jarvis.exe").touch()
+            with mock.patch.object(autostart, "_OS", "Windows"), mock.patch.object(autostart, "BASE", app):
+                self.assertEqual(autostart.command(), [str(Path(d) / "Jarvis.exe")])
+
+
 if __name__ == "__main__":
     unittest.main()
