@@ -1,113 +1,178 @@
-# 🤖 MARK XXXIX-OR (39)
-### The Ultimate Cross-Platform Personal AI Assistant — By FatihMakes
+# 🤖 J.A.R.V.I.S
 
-> 📺 **[Watch the full setup video on YouTube](https://youtu.be/ldvDNzwnM8k)**
+### Asistente personal de voz con IA para Windows, macOS y Linux
 
-A real-time voice AI that can hear, see, understand, and control your computer — on any OS. Supporting Windows, macOS, and Linux. Local execution. Zero subscriptions. Engineered for total autonomy.
+[![Descargar](https://img.shields.io/github/v/release/pablo29855/Jarvis-?label=descargar&style=for-the-badge)](https://github.com/pablo29855/Jarvis-/releases/latest)
+[![Tests](https://img.shields.io/github/actions/workflow/status/pablo29855/Jarvis-/tests.yml?label=tests&style=for-the-badge)](https://github.com/pablo29855/Jarvis-/actions/workflows/tests.yml)
+[![Licencia](https://img.shields.io/badge/licencia-CC%20BY--NC%204.0-lightgrey?style=for-the-badge)](https://creativecommons.org/licenses/by-nc/4.0/)
 
----
+JARVIS escucha, ve y controla tu computador. Le hablas o le escribes, y él abre apps, busca en la web, lee tus correos, maneja archivos, escribe y ejecuta código, y hace tareas de varios pasos en segundo plano mientras te cuenta lo que está haciendo.
 
-## ✨ Overview
-
-MARK XXXIX-OR represents the pinnacle of the Jarvis series, evolving into a more flexible and robust system. It bridges the gap between the operating system and human intent. Through natural dialogue, Mark 39 analyzes your screen, processes uploaded documents, and executes complex workflows with a brand-new, adaptive interface.
-
-It's not just an assistant — it's an extension of your digital life.
+> Basado en **[MARK XXXIX-OR](https://github.com/FatihMakes/Mark-XXXIX-OR)** de **[FatihMakes](https://www.youtube.com/@FatihMakes)**. Ver [Créditos](#-créditos).
 
 ---
 
-## 🚀 Capabilities
+## 📥 Descargar
 
-### Core Features
-| Feature | Description |
-|---|---|
-| 🎙️ Real-time Voice | Ultra-low latency conversation in any language |
-| 🖥️ System Control | Launch apps, manage files, execute terminal commands |
-| 🧩 Autonomous Tasks | High-level planning for complex, multi-step goals |
-| 👁️ Visual Awareness | Real-time screen processing and webcam vision |
-| 🧠 Persistent Memory | Deeply remembers your projects, preferences, and personal context |
-| ⌨️ Hybrid Input | Seamlessly switch between keyboard typing and voice commands |
+Instaladores listos para usar: traen Python, todas las librerías, Chromium y el modelo de la palabra de activación. No hay que instalar nada más.
 
----
-
-## 🆕 What's New in XXXIX-OR
-
-- 📂 **Advanced File Handling** — New support for direct file uploads. Drop PDFs, source code, or images into the assistant to have them analyzed, summarized, or edited instantly.
-- 🎨 **Adaptive & Flexible UI** — A complete overhaul of the interface. The new UI is fully resizable and responsive, featuring transparency controls and customizable layouts to fit your workspace perfectly.
-- 🐧🍎 **Refined Cross-Platform Stability** — Major fixes for macOS and Linux compatibility. Core system actions are now more consistent across all three major operating systems.
-- ⚡ **Optimized Core Engine** — Significant performance boost in tool-calling logic and response generation, resulting in a 40% faster interaction speed.
-- 🔀 **OpenRouter Integration** — Selected action modules (web search, memory, flight finder, desktop control, and more) now route their LLM calls through OpenRouter's free-tier models. This significantly increases the effective request limit without any additional cost, while Gemini Live continues to handle real-time voice and tool-calling.
-
----
-
-## ⚡ Quick Start
-
-```bash
-git clone https://github.com/FatihMakes/Mark-XXXIX-OR.git
-cd Mark-XXXIX-OR
-pip install -r requirements.txt
-playwright install
-python main.py
-```
-
-> ⚠️ **Installation Note:** To keep the repository lightweight, some OS-specific dependencies are not bundled in `requirements.txt`. If you run into a `ModuleNotFoundError`, simply install the missing package via `pip install <module_name>` for your specific system.
-
-### 📦 Installers
-
-`python installer/build.py` (run from a uv venv with Python 3.11) builds a self-contained installer for the current OS: Python, packages and Chromium included.
-
-| OS | Output | Install |
+| Sistema | Descarga | Cómo instalar |
 |---|---|---|
-| Windows | `dist/Jarvis-Setup.exe` (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)) | Run it; no admin needed |
-| macOS | `dist/Jarvis.dmg` | Drag J.A.R.V.I.S to Applications |
-| Linux | `dist/Jarvis-linux.tar.gz` | Extract, run `./install.sh` |
+| 🪟 **Windows 10/11** | [**Jarvis-Setup.exe**](https://github.com/pablo29855/Jarvis-/releases/latest/download/Jarvis-Setup.exe) | Ejecútalo. No necesita permisos de administrador. |
+| 🍎 **macOS** | [**Jarvis.dmg**](https://github.com/pablo29855/Jarvis-/releases/latest/download/Jarvis.dmg) | Abre el `.dmg` y arrastra JARVIS a Aplicaciones. |
+| 🐧 **Linux** | [**Jarvis-linux.tar.gz**](https://github.com/pablo29855/Jarvis-/releases/latest/download/Jarvis-linux.tar.gz) | Descomprime y ejecuta `./install.sh`. |
 
-The **Build installers** GitHub Action (`.github/workflows/build.yml`) builds all three. macOS and Linux installers can only be built on those systems.
+Todas las versiones: [Releases](https://github.com/pablo29855/Jarvis-/releases).
 
-### 🧠 Engines & API keys
+> **Primera vez:** los instaladores no están firmados.
+> - **Windows:** si aparece SmartScreen, pulsa *Más información* → *Ejecutar de todas formas*.
+> - **macOS:** clic derecho sobre JARVIS → *Abrir* → *Abrir*.
 
-The ⚙ button in the header opens the settings panel at any time. Pick the engine (Gemini Live, Claude, OpenAI, OpenRouter, Groq, DeepSeek or a local Ollama), its model and keys; JARVIS restarts with them. The left panel shows the active model and the tokens used this session.
+Al abrir JARVIS por primera vez, pulsa ⚙ y pon tus claves de API (ver [Motores y claves](#-motores-y-claves-de-api)).
 
-Gemini Live is native voice. The other engines use speech-to-text (OpenAI `gpt-4o-mini-transcribe` when an `openai_api_key` is saved, otherwise free Google STT, language `stt_language`, default `es-ES`) and Edge TTS (`tts_voice`, default `es-CO-GonzaloNeural`). Some tools (vision, web search, code helpers, memory) still use the Gemini and OpenRouter keys.
+---
 
-### 📧 Email
+## ✨ Qué hace
 
-JARVIS lists, searches, reads and drafts email, replies, and opens your webmail. It sends only after you say yes to the exact recipient, subject and text. Add accounts to `config/api_keys.json`:
+| | Función | Detalle |
+|---|---|---|
+| 🎙️ | **Voz en tiempo real** | Conversación natural en cualquier idioma. Responde siempre en el idioma en que le hablas. |
+| 👂 | **Palabra de activación local** | Di "Jarvis" para despertarlo. Funciona sin internet con [Vosk](https://alphacephei.com/vosk/); el audio no sale de tu equipo mientras duerme. |
+| 🧠 | **Varios cerebros** | Gemini Live, Claude (API o suscripción), OpenAI, OpenRouter, Groq, DeepSeek u Ollama local. |
+| 🖥️ | **Control del sistema** | Abre apps, maneja archivos, volumen, brillo, ventanas, teclado y ratón. |
+| 🧩 | **Tareas autónomas** | Planea y ejecuta tareas de varios pasos en segundo plano. El HUD muestra cada tarea y en qué paso va. |
+| 🛠️ | **Aprende habilidades** | Si no tiene una herramienta, escribe un script, lo prueba y lo guarda para la próxima vez. Pide confirmación antes de cualquier acción riesgosa. |
+| 👁️ | **Visión** | Analiza tu pantalla y la cámara. |
+| 📧 | **Correo** | Lee, busca, redacta y responde (Outlook / Microsoft 365, Gmail, IMAP). Solo envía después de tu "sí". |
+| 💬 | **Mensajes y música** | Telegram, WhatsApp, YouTube y Apple Music. |
+| 📂 | **Archivos** | Arrastra PDFs, código, Word, Excel o imágenes para resumirlos, analizarlos o editarlos. |
+| 💾 | **Memoria** | Recuerda tus preferencias y proyectos entre conversaciones. |
+| ⌨️ | **Voz o texto** | Escríbele cuando quieras, incluso mientras habla: responde al terminar. |
+
+---
+
+## 🧠 Motores y claves de API
+
+El botón ⚙ abre el panel de ajustes. Elige el motor, el modelo y pon sus claves; JARVIS se reinicia con ellos. El panel izquierdo muestra el modelo activo y los tokens usados.
+
+| Motor | Qué necesitas |
+|---|---|
+| **Gemini Live** (por defecto) | Clave gratis de [Google AI Studio](https://aistudio.google.com/apikey). Voz nativa. |
+| **Claude (suscripción)** | Tu cuenta de Claude Pro/Max; inicia sesión desde ajustes. |
+| **Claude, OpenAI, Groq, DeepSeek, OpenRouter** | La clave de API de cada servicio. |
+| **Ollama** | [Ollama](https://ollama.com) corriendo en tu equipo. Sin claves. |
+
+Los motores que no son Gemini Live usan reconocimiento de voz (OpenAI `gpt-4o-mini-transcribe` si hay `openai_api_key`, si no Google STT gratis) y voz de Gemini o Edge TTS. Algunas herramientas (visión, búsqueda web, memoria) usan las claves de Gemini y OpenRouter.
+
+Las claves se guardan solo en tu equipo, en `config/api_keys.json`.
+
+<details>
+<summary><b>📧 Configurar correo</b></summary>
+
+Añade tus cuentas a `config/api_keys.json`:
 
 ```json
 "email_accounts": [
-  {"name": "work", "type": "graph", "client_id": "<Entra ID app id>", "tenant": "organizations"},
-  {"name": "personal", "type": "imap", "address": "me@gmail.com", "password": "<app password>"}
+  {"name": "trabajo", "type": "graph", "client_id": "<id de la app en Entra ID>", "tenant": "organizations"},
+  {"name": "personal", "type": "imap", "address": "yo@gmail.com", "password": "<contraseña de aplicación>"}
 ]
 ```
 
-`graph` is Microsoft 365 / Outlook.com (use `"tenant": "consumers"` for personal Outlook.com). Register a public-client app in Entra ID with delegated `Mail.ReadWrite` and `Mail.Send`; the first use shows a code for microsoft.com/devicelogin. `imap` covers Gmail, Yahoo, iCloud, or any server with `imap`/`smtp`/`smtp_port`. Gmail needs an app password. Details: `actions/email_client.py`.
+- `graph`: Microsoft 365 / Outlook.com (usa `"tenant": "consumers"` para Outlook.com personal). Registra una app de cliente público en Entra ID con permisos delegados `Mail.ReadWrite` y `Mail.Send`. La primera vez muestra un código para microsoft.com/devicelogin.
+- `imap`: Gmail, Yahoo, iCloud o cualquier servidor con `imap`/`smtp`/`smtp_port`. Gmail necesita una contraseña de aplicación.
+
+Detalles en `actions/email_client.py`.
+</details>
+
+<details>
+<summary><b>👂 Palabra de activación</b></summary>
+
+En `config/api_keys.json`:
+
+```json
+"wake_word": "auto"
+```
+
+- `auto`: activa si Vosk y el modelo están instalados (los instaladores los traen).
+- `true`: siempre activa.
+- `false`: siempre escuchando, sin palabra de activación.
+
+El botón **MICROPHONE** de la ventana silencia el micrófono; también puedes pedírselo a JARVIS.
+</details>
 
 ---
 
-## 📋 Requirements
+## 👩‍💻 Ejecutar desde el código
 
-| Requirement | Details |
+Requiere Python 3.11 y se recomienda [uv](https://docs.astral.sh/uv/).
+
+```bash
+git clone https://github.com/pablo29855/Jarvis-.git
+cd Jarvis-
+uv venv -p 3.11 .venv
+uv pip install -p .venv -r requirements.txt
+.venv/bin/python -m playwright install chromium   # Windows: .venv\Scripts\python.exe
+.venv/bin/python main.py
+```
+
+Tests (sin red, sin micrófono, sin claves):
+
+```bash
+python -m unittest discover tests
+```
+
+### 📦 Construir los instaladores
+
+```bash
+.venv/bin/python installer/build.py
+```
+
+Construye el instalador del sistema donde lo ejecutas, en `dist/`. En Windows necesita [Inno Setup 6](https://jrsoftware.org/isinfo.php).
+
+**Publicar una versión:** sube un tag `vX.Y.Z` (por ejemplo `git tag v2.1.0 && git push origin v2.1.0`). La GitHub Action [Build installers](.github/workflows/build.yml) construye los tres instaladores y los publica en Releases. La versión se toma de `config/__init__.py`.
+
+### 🗂️ Estructura
+
+| Carpeta | Contenido |
 |---|---|
-| **OS** | Windows 10/11, macOS, or Linux |
-| **Python** | 3.11 or 3.12 |
-| **Microphone** | Required for voice interaction |
-| **API Keys** | Free Gemini API key + Free OpenRouter API key |
+| `main.py`, `engines.py` | Bucle de voz, motores y herramientas |
+| `ui.py` | Interfaz y HUD |
+| `agent/` | Planificador, ejecutor y cola de tareas en segundo plano |
+| `actions/` | Herramientas: apps, archivos, web, correo, mensajes, música… |
+| `memory/` | Memoria y habilidades aprendidas (`builtin_skills/` viene incluido) |
+| `wakeword.py` | Palabra de activación local |
+| `installer/` | Construcción de instaladores |
+| `tests/` | Tests |
 
 ---
 
-## ⚠️ License
+## 📋 Requisitos
 
-Personal and non-commercial use only.
-Licensed under **[Creative Commons BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)**.
+| | |
+|---|---|
+| **Sistema** | Windows 10/11, macOS o Linux (x64) |
+| **Micrófono** | Para hablarle (por texto funciona sin él) |
+| **Claves** | Al menos una: Gemini (gratis) o el motor que elijas |
+| **Espacio** | ~2 GB instalado |
 
 ---
 
-## 👤 Connect with the Creator
+## 🙏 Créditos
 
-Engineered by a developer building a real-world JARVIS-style assistant.
-⭐ **Star the repository to support the journey to Mark 100.**
+Este proyecto parte de **[MARK XXXIX-OR](https://github.com/FatihMakes/Mark-XXXIX-OR)**, creado por **FatihMakes**: la base de JARVIS, su interfaz, el bucle de voz con Gemini Live y las herramientas originales son su trabajo. El historial de commits original se conserva en este repositorio.
 
-| Platform | Link |
+Sigue al creador original:
+
+| Plataforma | Enlace |
 |---|---|
 | YouTube | [@FatihMakes](https://www.youtube.com/@FatihMakes) |
 | Instagram | [@fatihmakes](https://www.instagram.com/fatihmakes) |
+| Video de la versión original | [Ver en YouTube](https://youtu.be/ldvDNzwnM8k) |
+
+Mejoras de esta versión por **[Pablo Romero](https://github.com/pablo29855)**: cerebros Claude y multi-motor, palabra de activación local, HUD de tareas en segundo plano, habilidades aprendidas, correo, instaladores para cada sistema y actualizador.
+
+---
+
+## ⚠️ Licencia
+
+Uso personal y no comercial. Igual que el proyecto original, se distribuye bajo **[Creative Commons BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)**: puedes compartirlo y modificarlo dando crédito, pero no usarlo con fines comerciales.
