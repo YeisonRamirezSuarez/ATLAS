@@ -38,7 +38,7 @@ def _build_sandbox() -> dict:
         "len": len, "str": str, "int": int, "float": float,
         "bool": bool, "list": list, "dict": dict, "tuple": tuple,
         "range": range, "enumerate": enumerate, "sorted": sorted,
-        "isinstance": isinstance, "hasattr": hasattr, "getattr": getattr,
+        "isinstance": isinstance,
         "max": max, "min": min, "sum": sum, "abs": abs,
         "zip": zip, "map": map, "filter": filter,
     }
@@ -60,9 +60,7 @@ def _build_sandbox() -> dict:
 
     if _OS == "Windows":
         try:
-            import ctypes
             import winreg
-            sandbox["ctypes"] = ctypes
             sandbox["winreg"] = type("winreg", (), {
                 # Sadece okuma
                 "OpenKey":      winreg.OpenKey,
@@ -77,7 +75,9 @@ def _build_sandbox() -> dict:
 
 def _execute_generated_code(code: str, player=None) -> str:
     if not code or code.strip() == "UNSAFE":
-        return "This action cannot be performed safely."
+        return "Could not do it: this action cannot be performed safely."
+    if code.startswith("ERROR:"):
+        return f"Failed to generate the action: {code[6:].strip()}"
 
     # Kod temizleme
     if code.startswith("```"):
@@ -90,17 +90,17 @@ def _execute_generated_code(code: str, player=None) -> str:
 
     try:
         exec(compile(code, "<jarvis_desktop>", "exec"), sandbox)
-        return "\n".join(output_lines) if output_lines else "Done."
+        return "\n".join(output_lines) if output_lines else "Generated code ran without output; result not verified."
     except Exception as e:
         print(f"[Desktop] Exec error: {e}\nCode:\n{code[:300]}")
-        return f"Execution error: {e}"
+        return f"Error: generated code failed: {e}"
 
 def _ask_gemini_for_desktop_action(task: str) -> str:
     from or_client import client
 
     desktop = str(_get_desktop())
     os_specific = {
-        "Windows": "- ctypes (Windows API calls, read-only)\n- winreg (registry READ only)",
+        "Windows": "- winreg (registry READ only)",
         "Darwin":  "- subprocess is NOT available; use pyautogui or Path only",
         "Linux":   "- subprocess is NOT available; use pyautogui or Path only",
     }.get(_OS, "")
@@ -448,8 +448,7 @@ def desktop_control(
 
         else:
             if action:
-                code = _ask_gemini_for_desktop_action(action)
-                return _execute_generated_code(code, player=player)
+                return f"Unknown desktop action '{action}'. Use action='task' with a description for anything else."
             return "No action or task specified."
 
     except Exception as e:

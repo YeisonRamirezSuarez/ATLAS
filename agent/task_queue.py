@@ -32,6 +32,7 @@ class Task:
     speak:       Any        = field(compare=False, default=None)   
     on_complete: Any        = field(compare=False, default=None)  
     cancel_flag: threading.Event = field(compare=False, default_factory=threading.Event)
+    step:        str        = field(compare=False, default="")
 
 
 class TaskQueue:
@@ -45,6 +46,17 @@ class TaskQueue:
         self._max_concurrent = max_concurrent
         self._active_count   = 0
         self._executor       = None  
+        self.on_change: Callable | None = None   # (task_id, goal, step); goal "" = finished. Feeds the HUD.
+
+    def _notify(self, task: Task, step: str | None = None) -> None:
+        if step is not None:
+            task.step = step
+        if self.on_change:
+            done = task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
+            try:
+                self.on_change(task.task_id, "" if done else task.goal, task.step)
+            except Exception as e:
+                print(f"[TaskQueue] ⚠️ on_change error: {e}")
 
     def _get_executor(self):
         if self._executor is None:
@@ -95,6 +107,7 @@ class TaskQueue:
             self._condition.notify()
 
         print(f"[TaskQueue] 📥 Task queued: [{task_id}] {goal[:60]}")
+        self._notify(task, "QUEUED")
         return task_id
 
     def cancel(self, task_id: str) -> bool:
@@ -109,7 +122,8 @@ class TaskQueue:
             task.cancel_flag.set()
             task.status = TaskStatus.CANCELLED
             print(f"[TaskQueue] 🚫 Task cancelled: [{task_id}]")
-            return True
+        self._notify(task)
+        return True
 
     def get_status(self, task_id: str) -> dict | None:
         with self._lock:
@@ -122,6 +136,7 @@ class TaskQueue:
                 "status":  task.status.value,
                 "result":  task.result,
                 "error":   task.error,
+                "step":    task.step,
             }
 
     def get_all_statuses(self) -> list[dict]:
@@ -131,6 +146,7 @@ class TaskQueue:
                     "task_id": t.task_id,
                     "goal":    t.goal[:50],
                     "status":  t.status.value,
+                    "step":    t.step,
                 }
                 for t in self._tasks.values()
             ]
@@ -173,12 +189,14 @@ class TaskQueue:
 
     def _run_task(self, task: Task) -> None:
         print(f"[TaskQueue] ▶️ Running: [{task.task_id}] {task.goal[:60]}")
+        self._notify(task, "PLANNING")
         try:
             executor = self._get_executor()
             result   = executor.execute(
                 goal        = task.goal,
                 speak       = task.speak,
                 cancel_flag = task.cancel_flag,
+                on_step     = lambda s: self._notify(task, s),
             )
 
             with self._lock:
@@ -204,6 +222,7 @@ class TaskQueue:
                 self._active_count -= 1
             print(f"[TaskQueue] ❌ Failed: [{task.task_id}] {e}")
 
+        self._notify(task)
         with self._condition:
             self._condition.notify()
 

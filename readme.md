@@ -51,6 +51,37 @@ python main.py
 
 > ⚠️ **Installation Note:** To keep the repository lightweight, some OS-specific dependencies are not bundled in `requirements.txt`. If you run into a `ModuleNotFoundError`, simply install the missing package via `pip install <module_name>` for your specific system.
 
+### 📦 Installers
+
+`python installer/build.py` (run from a uv venv with Python 3.11) builds a self-contained installer for the current OS: Python, packages and Chromium included.
+
+| OS | Output | Install |
+|---|---|---|
+| Windows | `dist/Jarvis-Setup.exe` (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)) | Run it; no admin needed |
+| macOS | `dist/Jarvis.dmg` | Drag J.A.R.V.I.S to Applications |
+| Linux | `dist/Jarvis-linux.tar.gz` | Extract, run `./install.sh` |
+
+The **Build installers** GitHub Action (`.github/workflows/build.yml`) builds all three. macOS and Linux installers can only be built on those systems.
+
+### 🧠 Engines & API keys
+
+The ⚙ button in the header opens the settings panel at any time. Pick the engine (Gemini Live, Claude, OpenAI, OpenRouter, Groq, DeepSeek or a local Ollama), its model and keys; JARVIS restarts with them. The left panel shows the active model and the tokens used this session.
+
+Gemini Live is native voice. The other engines use speech-to-text (OpenAI `gpt-4o-mini-transcribe` when an `openai_api_key` is saved, otherwise free Google STT, language `stt_language`, default `es-ES`) and Edge TTS (`tts_voice`, default `es-CO-GonzaloNeural`). Some tools (vision, web search, code helpers, memory) still use the Gemini and OpenRouter keys.
+
+### 📧 Email
+
+JARVIS lists, searches, reads and drafts email, replies, and opens your webmail. It sends only after you say yes to the exact recipient, subject and text. Add accounts to `config/api_keys.json`:
+
+```json
+"email_accounts": [
+  {"name": "work", "type": "graph", "client_id": "<Entra ID app id>", "tenant": "organizations"},
+  {"name": "personal", "type": "imap", "address": "me@gmail.com", "password": "<app password>"}
+]
+```
+
+`graph` is Microsoft 365 / Outlook.com (use `"tenant": "consumers"` for personal Outlook.com). Register a public-client app in Entra ID with delegated `Mail.ReadWrite` and `Mail.Send`; the first use shows a code for microsoft.com/devicelogin. `imap` covers Gmail, Yahoo, iCloud, or any server with `imap`/`smtp`/`smtp_port`. Gmail needs an app password. Details: `actions/email_client.py`.
+
 ---
 
 ## 📋 Requirements

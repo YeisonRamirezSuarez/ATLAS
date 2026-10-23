@@ -1,0 +1,39 @@
+name: Build installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Linux audio/Qt libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 libxcb-cursor0
+      - name: Inno Setup
+        if: runner.os == 'Windows'
+        run: choco install innosetup -y --no-progress
+      # uv's Python is python-build-standalone: relocatable, so it can be shipped.
+      - run: uv venv -p 3.11 .venv
+      - run: uv pip install -p .venv -r requirements.txt
+      - name: Build
+        shell: bash
+        run: |
+          PY=.venv/bin/python; [ -f .venv/Scripts/python.exe ] && PY=.venv/Scripts/python.exe
+          $PY installer/build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-${{ runner.os }}
+          path: |
+            dist/Jarvis-Setup.exe
+            dist/Jarvis.dmg
+            dist/Jarvis-linux.tar.gz
+          if-no-files-found: error

@@ -1,6 +1,7 @@
 # actions/open_app.py
-# MARK XXV — Cross-Platform App Launcher
+# JARVIS — Cross-Platform App Launcher
 
+import os
 import time
 import subprocess
 import platform
@@ -162,6 +163,39 @@ _OS_LAUNCHERS = {
     "Darwin":  _launch_macos,
     "Linux":   _launch_linux,
 }
+
+
+def shell_open(path: str, app: str = "") -> str | None:
+    """Opens a file or folder with its default program, or with `app`. Returns an error message or None."""
+    system = platform.system()
+    try:
+        if not app:
+            if system == "Windows":
+                os.startfile(path)
+            else:
+                subprocess.Popen(["open" if system == "Darwin" else "xdg-open", path])
+            return None
+
+        app = _normalize(app)
+        if system == "Darwin":
+            result = subprocess.run(["open", "-a", app, path], capture_output=True, timeout=8)
+            if result.returncode:
+                return result.stderr.decode(errors="ignore").strip() or f"could not open with '{app}'"
+            return None
+
+        exe = shutil.which(app)
+        if exe:
+            subprocess.Popen([exe, path])
+            return None
+        if system != "Windows":
+            return f"program '{app}' not found"
+        # `start` also finds programs registered in App Paths (winword, excel...), which `which` misses.
+        if any(c in app for c in '&|<>^"%'):
+            return f"invalid program name '{app}'"
+        result = subprocess.run(["cmd", "/c", "start", "", app, path], capture_output=True, timeout=8)
+        return f"program '{app}' not found" if result.returncode else None
+    except Exception as e:
+        return str(e)
 
 
 def open_app(

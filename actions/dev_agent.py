@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import sys
 import json
@@ -16,8 +17,8 @@ BASE_DIR         = get_base_dir()
 API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
 PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
 MAX_FIX_ATTEMPTS = 5
-MODEL_PLANNER    = "gemini-2.5-flash"
-MODEL_WRITER     = "gemini-2.5-flash"
+MODEL_PLANNER    = "gemini-flash-latest"
+MODEL_WRITER     = "gemini-flash-latest"
 
 def _get_api_key() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -218,6 +219,8 @@ Code for {file_path}:"""
         code = _strip_fences(response.text)
 
         full_path = project_dir / file_path
+        if project_dir.resolve() not in full_path.resolve().parents:   # model-chosen path: no ../ escapes
+            raise PermissionError(f"{file_path} is outside the project folder")
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(code, encoding="utf-8")
 
@@ -229,15 +232,28 @@ Code for {file_path}:"""
             raise RateLimitError(str(e))
         raise
 
+def _venv_python(project_dir: Path) -> str:
+    """Python of the project's own .venv (created on first use)."""
+    venv = project_dir / ".venv"
+    py = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    if not py.exists():
+        base = shutil.which("python3") or shutil.which("python") if getattr(sys, "frozen", False) else sys.executable
+        subprocess.run([base, "-m", "venv", str(venv)], check=True, capture_output=True, timeout=180)
+    return str(py)
+
 def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
     if not dependencies:
         return "No external dependencies."
+    try:
+        py = _venv_python(project_dir)
+    except Exception as e:
+        return f"Could not create the project venv, dependencies not installed: {e}"
 
     to_install = []
     for dep in dependencies:
         pkg_name = re.split(r"[>=<!]", dep)[0].strip()
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "show", pkg_name],
+            [py, "-m", "pip", "show", pkg_name],
             capture_output=True, text=True
         )
         if result.returncode != 0:
@@ -251,7 +267,7 @@ def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
     print(f"[DevAgent] 📦 Installing: {to_install}")
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install"] + to_install,
+            [py, "-m", "pip", "install"] + to_install,
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=120, cwd=str(project_dir)
@@ -289,8 +305,8 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
     print(f"[DevAgent] 🚀 Running: {run_command}")
     try:
         parts = run_command.split()
-        if parts[0].lower() == "python":
-            parts[0] = sys.executable
+        if parts[0].lower() in ("python", "python3", "py"):
+            parts[0] = _venv_python(project_dir)
 
         result = subprocess.run(
             parts,
@@ -312,7 +328,7 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
         return "\n\n".join(combined_parts) if combined_parts else "Ran with no output."
 
     except subprocess.TimeoutExpired:
-        return f"Timed out after {timeout}s — long-running app (server/GUI) is likely working."
+        return f"Timed out after {timeout}s: still running when stopped (server/GUI?). No crash seen; not verified."
     except FileNotFoundError as e:
         return f"Command not found: {e}"
     except Exception as e:
@@ -331,7 +347,7 @@ def _try_auto_install(error_output: str, project_dir: Path) -> bool:
     print(f"[DevAgent] 🔧 Auto-installing missing package: {pkg}")
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", pkg],
+            [_venv_python(project_dir), "-m", "pip", "install", pkg],
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=60, cwd=str(project_dir)
@@ -416,6 +432,8 @@ Fixed code for {fix_path}:"""
             fixed = _strip_fences(response.text)
 
             full_path = project_dir / fix_path
+            if project_dir.resolve() not in full_path.resolve().parents:
+                raise PermissionError(f"{fix_path} is outside the project folder")
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(fixed, encoding="utf-8")
 
@@ -523,6 +541,11 @@ def _build_project(
         log(f"Output preview: {last_output[:150]}")
 
         if not _has_error(last_output, run_command):
+            if "timed out" in last_output.lower():
+                msg = (f"Project '{proj_name}' started and was still running after {timeout}s, sir. "
+                       f"No crash seen, but I could not verify it works. Saved to: {project_dir}")
+                if speak: speak(msg)
+                return f"{msg}\n\nOutput:\n{last_output}"
             msg = (
                 f"Project '{proj_name}' is working, sir. "
                 f"Built in {attempt} attempt{'s' if attempt > 1 else ''}. "

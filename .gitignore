@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+config/api_keys.json
+memory/long_term.json
+memory/skills/
+jarvis.log
+dist/
+build/
+bin/
+config/telegram.session*
+config/msal_cache.bin
+models/
+backups/
+memory/.version
+Jarvis.exe
+memory/*.corrupt-*.json

@@ -1,7 +1,9 @@
 import json
 import re
+import shutil
+import subprocess
 from datetime import datetime
-from threading import Lock
+from threading import Lock, Thread
 from pathlib import Path
 import sys
 
@@ -15,8 +17,92 @@ def get_base_dir() -> Path:
 BASE_DIR         = get_base_dir()
 MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
 _lock            = Lock()
+_update_lock     = Lock()   # load-modify-save of update_memory runs one at a time
 MAX_VALUE_LENGTH = 380
 MEMORY_MAX_CHARS = 2200
+
+# Engram (https://github.com/Gentleman-Programming/engram) keeps every fact forever,
+# so facts trimmed from long_term.json stay searchable, and logs every conversation so
+# Jarvis builds up memories with use. Shipped in bin/ (installer); else from PATH; else skipped.
+ENGRAM_BIN     = shutil.which("engram", path=str(BASE_DIR / "bin")) or shutil.which("engram")
+ENGRAM_PROJECT = "mark-xxxix"
+
+
+def _engram(*args: str) -> str:
+    if not ENGRAM_BIN:
+        return ""
+    try:
+        r = subprocess.run(
+            [ENGRAM_BIN, *args, "--project", ENGRAM_PROJECT],
+            capture_output=True, text=True, encoding="utf-8", timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return r.stdout.strip()
+    except Exception as e:
+        print(f"[Memory] ⚠️ Engram error: {e}")
+        return ""
+
+
+def _engram_save_async(title: str, content: str, category: str) -> None:
+    # ponytail: CLI save appends, no upsert; old values stay with older dates. Use HTTP topic_key if it gets noisy.
+    Thread(target=_engram, args=("save", title, content, "--type", category), daemon=True).start()
+
+
+def save_conversation(user_text: str, jarvis_text: str) -> None:
+    _engram_save_async(user_text[:60], f"User: {user_text[:600]}\nJarvis: {jarvis_text[:600]}", "conversation")
+
+
+def recent_memories(max_chars: int = 1500) -> str:
+    """Latest engram observations (facts and conversations) for the system prompt."""
+    out = _engram("context")
+    if not out:
+        return ""
+    if len(out) > max_chars:
+        out = out[:max_chars - 1] + "…"
+    return ("[RECENT MEMORIES — earlier conversations with this person. Let them shape "
+            "your tone and references; call search_memory for anything older]\n" + out + "\n")
+
+
+# Learned skills: scripts that solved a task. Engram indexes them (its search output
+# truncates long content), the code itself lives in memory/skills/.
+SKILLS_DIR = BASE_DIR / "memory" / "skills"
+BUILTIN_SKILLS_DIR = BASE_DIR / "memory" / "builtin_skills"   # shipped with the app, no user data; not in engram
+
+
+def save_skill(goal: str, plan: str, code: str) -> None:
+    SKILLS_DIR.mkdir(exist_ok=True)
+    name = f"{re.sub(r'[^a-z0-9]+', '_', goal.lower()).strip('_')[:40]}_{datetime.now():%Y%m%d%H%M%S}.py"
+    (SKILLS_DIR / name).write_text(code, encoding="utf-8")
+    _engram_save_async(f"skill: {goal[:80]}", f"file: {name}\n{plan}\nTask: {goal}", "skill")
+
+
+def find_skills(goal: str, limit: int = 3) -> list[tuple[str, str]]:
+    """(task, code) of learned skills similar to `goal`, best match first."""
+    out = _engram("search", goal, "--type", "skill", "--match", "any", "--limit", str(limit))
+    found = []
+    for title, name in re.findall(r"— skill: (.*)\n\s*file: ([\w-]+\.py)", out):
+        path = SKILLS_DIR / name
+        if path.is_file():
+            found.append((title.strip(), path.read_text(encoding="utf-8")))
+    if len(found) < limit:
+        # ponytail: word overlap with the name and PLAN line; fine for a few dozen builtin skills.
+        words = set(re.findall(r"[a-z]{4,}", goal.lower()))
+        scored = []
+        for path in BUILTIN_SKILLS_DIR.glob("*.py"):
+            code = path.read_text(encoding="utf-8")
+            plan = code.split("\n", 1)[0].removeprefix("# PLAN:").strip()
+            hits = len(words & set(re.findall(r"[a-z]{4,}", f"{path.stem} {plan}".lower())))
+            if hits >= 2:
+                scored.append((hits, plan, code))
+        found += [(plan, code) for _, plan, code in sorted(scored, reverse=True)[:limit - len(found)]]
+    return found
+
+
+def search_memory(query: str) -> str:
+    if not ENGRAM_BIN:
+        return "Long-term memory search unavailable (engram not installed)."
+    out = _engram("search", query, "--match", "any", "--limit", "10")
+    return out or f"No memories found for: {query}"
 
 
 def _empty_memory() -> dict:
@@ -45,7 +131,13 @@ def load_memory() -> dict:
                 return data
             return _empty_memory()
         except Exception as e:
-            print(f"[Memory] ⚠️ Load error: {e}")
+            # Keep the unreadable file: the next save would otherwise overwrite it with empty memory.
+            backup = MEMORY_PATH.with_name(f"long_term.corrupt-{datetime.now():%Y%m%d-%H%M%S}.json")
+            try:
+                MEMORY_PATH.replace(backup)
+            except OSError:
+                pass
+            print(f"[Memory] ⚠️ Load error: {e} (file kept as {backup.name})")
             return _empty_memory()
 
 
@@ -85,10 +177,10 @@ def save_memory(memory: dict) -> None:
 
     MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
-        MEMORY_PATH.write_text(
-            json.dumps(memory, indent=2, ensure_ascii=False),
-            encoding="utf-8"
-        )
+        # Atomic: write a temp file, then rename over the old one (a crash never leaves half a file).
+        tmp = MEMORY_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(memory, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(MEMORY_PATH)
 
 
 def _truncate_value(val: str) -> str:
@@ -97,7 +189,7 @@ def _truncate_value(val: str) -> str:
     return val
 
 
-def _recursive_update(target: dict, updates: dict) -> bool:
+def _recursive_update(target: dict, updates: dict, path: str = "") -> bool:
     changed = False
     for key, value in updates.items():
         if value is None:
@@ -109,7 +201,7 @@ def _recursive_update(target: dict, updates: dict) -> bool:
             if key not in target or not isinstance(target[key], dict):
                 target[key] = {}
                 changed = True
-            if _recursive_update(target[key], value):
+            if _recursive_update(target[key], value, f"{path}{key}/"):
                 changed = True
         else:
             if isinstance(value, dict) and "value" in value:
@@ -122,6 +214,8 @@ def _recursive_update(target: dict, updates: dict) -> bool:
             if not isinstance(existing, dict) or existing.get("value") != new_val:
                 target[key] = entry
                 changed = True
+                title = f"{path}{key}"
+                _engram_save_async(title, f"{key.replace('_', ' ')}: {new_val}", title.split("/")[0])
 
     return changed
 
@@ -130,10 +224,11 @@ def update_memory(memory_update: dict) -> dict:
     if not isinstance(memory_update, dict) or not memory_update:
         return load_memory()
 
-    memory = load_memory()
-    if _recursive_update(memory, memory_update):
-        save_memory(memory)
-        print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
+    with _update_lock:
+        memory = load_memory()
+        if _recursive_update(memory, memory_update):
+            save_memory(memory)
+            print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
     return memory
 
 
@@ -153,7 +248,7 @@ def should_extract_memory(user_text: str, jarvis_text: str, api_key: str = "") -
             f"- Any other fact worth remembering long-term\n\n"
             f"Reply only YES or NO.\n\nConversation:\n{combined}",
             system="You are a memory relevance checker. Reply only YES or NO.",
-            max_tokens=5,
+            max_tokens=50,   # thinking models spend tokens before the YES/NO
             temperature=0.0,
         )
         return "YES" in result.upper()
@@ -304,13 +399,14 @@ def remember(key: str, value: str, category: str = "notes") -> str:
 
 
 def forget(key: str, category: str = "notes") -> str:
-    memory = load_memory()
-    cat    = memory.get(category, {})
-    if key in cat:
-        del cat[key]
-        memory[category] = cat
-        save_memory(memory)
-        return f"Forgotten: {category}/{key}"
+    with _update_lock:
+        memory = load_memory()
+        cat    = memory.get(category, {})
+        if key in cat:
+            del cat[key]
+            memory[category] = cat
+            save_memory(memory)
+            return f"Forgotten: {category}/{key}"
     return f"Not found: {category}/{key}"
 
 forget_memory = forget

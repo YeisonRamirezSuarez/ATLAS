@@ -5,12 +5,17 @@ import json
 import time
 import subprocess
 import threading
-import winreg
+try:
+    import winreg  # Windows only: without it Steam/Epic are reported as not found
+except ImportError:
+    winreg = None
 from pathlib import Path
 from datetime import datetime
 
 
 def _find_steam_path() -> Path | None:
+    if not winreg:
+        return None
     registry_keys = [
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam"),
@@ -37,6 +42,8 @@ def _find_steam_path() -> Path | None:
 
 
 def _find_epic_path() -> Path | None:
+    if not winreg:
+        return None
     registry_keys = [
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\EpicGames\EpicGamesLauncher"),
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\EpicGames\EpicGamesLauncher"),

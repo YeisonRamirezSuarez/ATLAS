@@ -47,7 +47,7 @@ HEADERS = {
 
 _YT_VIDEO_FILTER = "EgIQAQ%3D%3D"
 
-def _open_url(url: str) -> None:
+def _open_url(url: str) -> bool:
     try:
         if is_mac():
             subprocess.Popen(["open", url])
@@ -55,8 +55,10 @@ def _open_url(url: str) -> None:
             subprocess.Popen(["xdg-open", url])
         else:
             subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+        return True
     except Exception as e:
         print(f"[YouTube] ⚠️ open_url failed: {e}")
+        return False
 
 def _scrape_first_video_url(query: str) -> str | None:
 
@@ -111,7 +113,7 @@ def _ask_for_url(prompt_text: str = "YouTube video URL:") -> str | None:
             root = tk.Tk()
             root.withdraw()
 
-        url = simpledialog.askstring("J.A.R.V.I.S", prompt_text, parent=root)
+        url = simpledialog.askstring("JARVIS", prompt_text, parent=root)
         return url.strip() if url else None
     except Exception as e:
         print(f"[YouTube] ⚠️ URL dialog failed: {e}")
@@ -272,8 +274,10 @@ def _handle_play(parameters: dict, player) -> str:
 
     if video_url:
         print(f"[YouTube] ▶️ Opening: {video_url}")
-        _open_url(video_url)
-        return f"Playing: {query}"
+        if not _open_url(video_url):
+            return f"Could not open the browser for: {video_url}"
+        # The browser gives no feedback, so playback can't be confirmed from here.
+        return f"Opened {video_url} ('{query}') in the browser; playback not verified."
 
     print(f"[YouTube] ⚠️ Scrape failed, opening filtered search page")
     fallback_url = (
@@ -281,8 +285,9 @@ def _handle_play(parameters: dict, player) -> str:
         f"?search_query={quote_plus(query)}"
         f"&sp={_YT_VIDEO_FILTER}"
     )
-    _open_url(fallback_url)
-    return f"Opened YouTube search for: {query} (manual selection required)"
+    if not _open_url(fallback_url):
+        return f"Could not open the browser for YouTube search: {query}"
+    return f"Opened YouTube search for '{query}' in the browser; no video picked, so nothing is playing yet."
 
 
 def _handle_summarize(parameters: dict, player, speak) -> str:
@@ -415,4 +420,4 @@ def youtube_video(
         return handler(params, player, speak) or "Done."
     except Exception as e:
         print(f"[YouTube] ❌ Error in {action}: {e}")
-        return f"YouTube {action} failed, sir: {e}"
+        return f"Failed YouTube {action}: {e}"

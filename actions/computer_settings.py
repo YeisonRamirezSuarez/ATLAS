@@ -5,6 +5,7 @@ import sys
 import time
 import subprocess
 import platform
+import shutil
 from pathlib import Path
 
 try:
@@ -45,122 +46,154 @@ def _get_macos_wifi_interface() -> str:
         pass
     return "en0" 
 
-def volume_up():
-    if _OS == "Windows":
-        for _ in range(5): pyautogui.press("volumeup")
-    elif _OS == "Darwin":
-        subprocess.run(["osascript", "-e",
-            "set volume output volume (output volume of (get volume settings) + 10)"],
-            capture_output=True)
-    else:
-        subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", "+10%"],
-            capture_output=True)
+# ── Windows: real APIs that report the resulting state, instead of key presses ──
+# Every function may return a string; computer_settings() passes it to the model as the truth.
 
-def volume_down():
-    if _OS == "Windows":
-        for _ in range(5): pyautogui.press("volumedown")
-    elif _OS == "Darwin":
-        subprocess.run(["osascript", "-e",
-            "set volume output volume (output volume of (get volume settings) - 10)"],
-            capture_output=True)
-    else:
-        subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", "-10%"],
-            capture_output=True)
+def _speakers():
+    import comtypes
+    from pycaw.pycaw import AudioUtilities
+    try:
+        comtypes.CoInitialize()  # tools run on executor threads, COM is per-thread
+    except OSError:
+        pass  # RPC_E_CHANGED_MODE: thread already joined COM in another mode, still usable
+    return AudioUtilities.GetSpeakers().EndpointVolume
 
-def volume_mute():
-    if _OS == "Windows":
-        pyautogui.press("volumemute")
-    elif _OS == "Darwin":
-        subprocess.run(["osascript", "-e", "set volume with output muted"],
-            capture_output=True)
-    else:
-        subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"],
-            capture_output=True)
 
-def volume_set(value: int):
-    value = max(0, min(100, int(value)))
-    if _OS == "Windows":
-        try:
-            import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-            devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
-            vol_db    = -65.25 if value == 0 else max(-65.25, 20 * math.log10(value / 100))
-            vol.SetMasterVolumeLevel(vol_db, None)
-            return
-        except Exception as e:
-            print(f"[Settings] pycaw failed, using keypress fallback: {e}")
-            pyautogui.press("volumemute")
-            pyautogui.press("volumemute")
-    elif _OS == "Darwin":
-        subprocess.run(["osascript", "-e", f"set volume output volume {value}"],
-            capture_output=True)
-        return
-    else:
-        subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{value}%"],
-            capture_output=True)
-        return
+def _win_volume(delta: int | None = None, absolute: int | None = None, mute: bool | None = None) -> str:
+    ev = _speakers()
+    if mute is not None:
+        ev.SetMute(int(mute), None)
+    if absolute is not None or delta is not None:
+        level = absolute if absolute is not None else round(ev.GetMasterVolumeLevelScalar() * 100) + delta
+        ev.SetMasterVolumeLevelScalar(max(0, min(100, level)) / 100, None)
+        if level > 0 and mute is None:
+            ev.SetMute(0, None)
+    level = round(ev.GetMasterVolumeLevelScalar() * 100)
+    return f"Volume is now {level}%{' (muted)' if ev.GetMute() else ''}."
 
-def brightness_up():
-    if _OS == "Darwin":
-        subprocess.run(["osascript", "-e",
-            'tell application "System Events" to key code 144'],
-            capture_output=True)
-    elif _OS == "Linux":
-        if subprocess.run(["which", "brightnessctl"],
-                capture_output=True).returncode == 0:
-            subprocess.run(["brightnessctl", "set", "+10%"], capture_output=True)
+
+def _win_brightness(delta: int | None = None, absolute: int | None = None) -> str:
+    get = "(Get-CimInstance -Namespace root/wmi -ClassName WmiMonitorBrightness -ErrorAction Stop).CurrentBrightness"
+    script = get
+    if delta is not None or absolute is not None:
+        target = f"{absolute}" if absolute is not None else f"({get}) + ({delta})"
+        script = (f"$t = [math]::Max(0, [math]::Min(100, {target}));"
+                  f"Invoke-CimMethod -InputObject (Get-CimInstance -Namespace root/wmi -ClassName "
+                  f"WmiMonitorBrightnessMethods -ErrorAction Stop) -MethodName WmiSetBrightness "
+                  f"-Arguments @{{Timeout=1; Brightness=[byte]$t}} | Out-Null; Start-Sleep -Milliseconds 300; {get}")
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True,
+                       timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    level = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+    if r.returncode != 0 or not level.isdigit():
+        return ("Could not change brightness: this display does not support software brightness control "
+                "(external monitors usually don't).")
+    return f"Brightness is now {level}%."
+
+
+def _win_shutdown(*args: str) -> str:
+    r = subprocess.run(["shutdown", *args], capture_output=True, text=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return "" if r.returncode == 0 else (r.stderr or r.stdout).strip() or f"exit code {r.returncode}"
+
+
+# ── macOS / Linux: same contract, the resulting level is read back, never assumed ──
+
+def _run(*argv: str) -> str:
+    """stdout of a command; RuntimeError with the reason when it fails or is not installed."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"{argv[0]}: {e}") from None
+    if r.returncode:
+        raise RuntimeError((r.stderr or r.stdout).strip() or f"{argv[0]} exit code {r.returncode}")
+    return r.stdout.strip()
+
+
+def _step(delta: int) -> str:
+    return f"{abs(delta)}%{'+' if delta > 0 else '-'}"
+
+
+def _unix_volume(delta: int | None = None, absolute: int | None = None, mute: bool | None = None) -> str:
+    """macOS: osascript. Linux: wpctl (PipeWire: Fedora, Bazzite, Ubuntu 22.10+) or pactl (PulseAudio)."""
+    try:
+        if _OS == "Darwin":
+            cmds = []
+            if mute is not None:
+                cmds.append(f"set volume {'with' if mute else 'without'} output muted")
+            if absolute is not None:
+                cmds.append(f"set volume output volume {absolute}")
+            if delta is not None:
+                cmds.append(f"set volume output volume (output volume of (get volume settings) + {delta})")
+            # -> "output volume:45, input volume:75, alert volume:100, output muted:false"
+            out = _run("osascript", *[x for c in cmds for x in ("-e", c)], "-e", "get volume settings")
+            m, muted = re.search(r"output volume:(\d+)", out), "output muted:true" in out
+            level = int(m.group(1)) if m else None
+        elif shutil.which("wpctl"):
+            sink = "@DEFAULT_AUDIO_SINK@"
+            if mute is not None:
+                _run("wpctl", "set-mute", sink, "1" if mute else "0")
+            if absolute is not None:
+                _run("wpctl", "set-volume", sink, f"{absolute}%")
+            if delta is not None:
+                _run("wpctl", "set-volume", "-l", "1.0", sink, _step(delta))
+            out = _run("wpctl", "get-volume", sink)          # -> "Volume: 0.45 [MUTED]"
+            m, muted = re.search(r"([\d.]+)", out), "MUTED" in out
+            level = round(float(m.group(1)) * 100) if m else None
         else:
-            subprocess.run(
-                'xrandr --output $(xrandr | grep " connected" | head -1 | cut -d " " -f1)'
-                ' --brightness $(python3 -c "import subprocess; '
-                'b=float(subprocess.check_output([\"xrandr\",\"--verbose\"]).decode()'
-                '.split(\"Brightness:\")[1].split()[0]); print(min(1.0,b+0.1))")',
-                shell=True, capture_output=True
-            )
-    else:
-        try:
-            subprocess.run(
-                ["powershell", "-Command",
-                 "(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightnessMethods)"
-                 ".WmiSetBrightness(1, [math]::Min(100, "
-                 "(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightness).CurrentBrightness + 10))"],
-                capture_output=True, timeout=5
-            )
-        except Exception as e:
-            print(f"[Settings] Brightness up failed on Windows: {e}")
+            sink = "@DEFAULT_SINK@"
+            if mute is not None:
+                _run("pactl", "set-sink-mute", sink, "1" if mute else "0")
+            if absolute is not None:
+                _run("pactl", "set-sink-volume", sink, f"{absolute}%")
+            if delta is not None:
+                _run("pactl", "set-sink-volume", sink, f"{'+' if delta > 0 else '-'}{abs(delta)}%")
+            m = re.search(r"(\d+)%", _run("pactl", "get-sink-volume", sink))
+            muted = "yes" in _run("pactl", "get-sink-mute", sink)
+            level = int(m.group(1)) if m else None
+    except RuntimeError as e:
+        return f"Could not change the volume: {e}"
+    if level is None:
+        return "Volume command ran but the new level could not be read; effect not verified."
+    return f"Volume is now {level}%{' (muted)' if muted else ''}."
 
-def brightness_down():
+
+def _unix_brightness(delta: int | None = None, absolute: int | None = None) -> str:
+    """Linux: brightnessctl (backlight via sysfs, works on X11 and Wayland). macOS: brightness keys."""
     if _OS == "Darwin":
-        subprocess.run(["osascript", "-e",
-            'tell application "System Events" to key code 145'],
-            capture_output=True)
-    elif _OS == "Linux":
-        if subprocess.run(["which", "brightnessctl"],
-                capture_output=True).returncode == 0:
-            subprocess.run(["brightnessctl", "set", "10%-"], capture_output=True)
-        else:
-            subprocess.run(
-                'xrandr --output $(xrandr | grep " connected" | head -1 | cut -d " " -f1)'
-                ' --brightness $(python3 -c "import subprocess; '
-                'b=float(subprocess.check_output([\"xrandr\",\"--verbose\"]).decode()'
-                '.split(\"Brightness:\")[1].split()[0]); print(max(0.1,b-0.1))")',
-                shell=True, capture_output=True
-            )
-    else:
+        if absolute is not None:
+            return "Could not set an exact brightness: macOS only supports brightness up/down here."
         try:
-            subprocess.run(
-                ["powershell", "-Command",
-                 "(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightnessMethods)"
-                 ".WmiSetBrightness(1, [math]::Max(0, "
-                 "(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightness).CurrentBrightness - 10))"],
-                capture_output=True, timeout=5
-            )
-        except Exception as e:
-            print(f"[Settings] Brightness down failed on Windows: {e}")
+            _run("osascript", "-e", f'tell application "System Events" to key code {144 if delta > 0 else 145}')
+        except RuntimeError as e:
+            return f"Could not change brightness: {e}"
+        return "Sent the brightness key; effect not verified."
+    if not shutil.which("brightnessctl"):
+        return "Could not change brightness: brightnessctl is not installed (it works on X11 and Wayland)."
+    try:
+        if absolute is not None:
+            _run("brightnessctl", "-q", "set", f"{absolute}%")
+        elif delta:
+            _run("brightnessctl", "-q", "set", _step(delta))
+        out = _run("brightnessctl", "-m")    # -> "intel_backlight,backlight,400,40%,1000"
+    except RuntimeError as e:
+        return f"Could not change brightness: {e}"
+    parts = out.splitlines()[0].split(",") if out else []
+    if len(parts) < 4:
+        return "Brightness command ran but the new level could not be read; effect not verified."
+    return f"Brightness is now {parts[3]}."
+
+
+_volume     = _win_volume if _OS == "Windows" else _unix_volume
+_brightness = _win_brightness if _OS == "Windows" else _unix_brightness
+
+def volume_up():      return _volume(delta=10)
+def volume_down():    return _volume(delta=-10)
+def volume_mute():    return _volume(mute=True)
+def volume_unmute():  return _volume(mute=False)
+def volume_set(value: int):     return _volume(absolute=max(0, min(100, int(value))))
+def brightness_up():   return _brightness(delta=10)
+def brightness_down(): return _brightness(delta=-10)
+def brightness_set(value: int): return _brightness(absolute=max(0, min(100, int(value))))
 
 def close_app():
     if _OS == "Darwin": pyautogui.hotkey("command", "q")
@@ -238,7 +271,11 @@ def focus_search():
     if _OS == "Darwin": pyautogui.hotkey("command", "l")
     else:               pyautogui.hotkey("ctrl", "l")
 
-def pause_video():      pyautogui.press("space")
+# Media keys reach Spotify, YouTube, the Music app... whatever owns the media session.
+# Windows gives no feedback, so the result says the key was sent, not that the song changed.
+def play_pause():  pyautogui.press("playpause"); return "Sent the play/pause media key."
+def next_track():  pyautogui.press("nexttrack"); return "Sent the next-track media key."
+def prev_track():  pyautogui.press("prevtrack"); return "Sent the previous-track media key."
 
 def refresh_page():
     if _OS == "Darwin": pyautogui.hotkey("command", "r")
@@ -364,7 +401,10 @@ def take_screenshot():
 
 def lock_screen():
     if _OS == "Windows":
-        pyautogui.hotkey("win", "l")
+        import ctypes
+        if not ctypes.windll.user32.LockWorkStation():
+            return f"Could not lock the PC (error {ctypes.GetLastError()})."
+        return "PC locked."
     elif _OS == "Darwin":
         subprocess.run(["pmset", "displaysleepnow"], capture_output=True)
     else:
@@ -479,7 +519,9 @@ def toggle_wifi():
 
 def restart_computer():
     if _OS == "Windows":
-        subprocess.run(["shutdown", "/r", "/t", "10"], capture_output=True)
+        error = _win_shutdown("/r", "/t", "15")
+        return f"Could not restart: {error}" if error else \
+               "Restarting in 15 seconds. Say 'cancel shutdown' to abort."
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             'tell application "System Events" to restart'],
@@ -489,7 +531,9 @@ def restart_computer():
 
 def shutdown_computer():
     if _OS == "Windows":
-        subprocess.run(["shutdown", "/s", "/t", "10"], capture_output=True)
+        error = _win_shutdown("/s", "/t", "15")
+        return f"Could not shut down: {error}" if error else \
+               "Shutting down in 15 seconds. Say 'cancel shutdown' to abort."
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             'tell application "System Events" to shut down'],
@@ -497,18 +541,38 @@ def shutdown_computer():
     else:
         subprocess.run(["systemctl", "poweroff"], capture_output=True)
 
+def cancel_shutdown():
+    if _OS == "Windows":
+        error = _win_shutdown("/a")
+        return f"Nothing to cancel: {error}" if error else "Shutdown/restart cancelled."
+    subprocess.run(["shutdown", "-c"], capture_output=True)
+
+def sleep_computer():
+    if _OS == "Windows":
+        import ctypes
+        # SetSuspendState(hibernate=False, force=False, wakeupEvents=False)
+        if not ctypes.windll.powrprof.SetSuspendState(False, False, False):
+            return "Could not put the PC to sleep."
+        return "PC went to sleep."
+    if _OS == "Darwin":
+        subprocess.run(["pmset", "sleepnow"], capture_output=True)
+    else:
+        subprocess.run(["systemctl", "suspend"], capture_output=True)
+
 ACTION_MAP: dict[str, callable] = {
     "volume_up":           volume_up,
     "volume_down":         volume_down,
     "mute":                volume_mute,
-    "unmute":              volume_mute,
-    "toggle_mute":         volume_mute,
+    "unmute":              volume_unmute,
     "brightness_up":       brightness_up,
     "brightness_down":     brightness_down,
     "sleep_display":       sleep_display,
     "screen_off":          sleep_display,
-    "pause_video":         pause_video,
-    "play_pause":          pause_video,
+    "sleep":               sleep_computer,
+    "play_pause":          play_pause,
+    "pause_video":         play_pause,
+    "next_track":          next_track,
+    "prev_track":          prev_track,
     "close_app":           close_app,
     "close_window":        close_window,
     "full_screen":         full_screen,
@@ -557,6 +621,17 @@ ACTION_MAP: dict[str, callable] = {
     "toggle_wifi":         toggle_wifi,
     "restart":             restart_computer,
     "shutdown":            shutdown_computer,
+    "cancel_shutdown":     cancel_shutdown,
+}
+
+# Names models tend to invent, mapped to the real action.
+_ALIASES = {
+    "lock": "lock_screen", "lock_pc": "lock_screen", "lock_computer": "lock_screen",
+    "next": "next_track", "next_song": "next_track", "skip": "next_track", "skip_track": "next_track",
+    "previous": "prev_track", "previous_track": "prev_track", "previous_song": "prev_track",
+    "play": "play_pause", "pause": "play_pause", "resume": "play_pause", "toggle_mute": "mute",
+    "set_volume": "volume_set", "set_brightness": "brightness_set", "power_off": "shutdown",
+    "turn_off": "shutdown", "reboot": "restart", "abort_shutdown": "cancel_shutdown", "suspend": "sleep",
 }
 
 _DANGEROUS_ACTIONS = {"restart", "shutdown"}
@@ -566,14 +641,14 @@ def _detect_action(description: str) -> dict:
     from or_client import client
 
     available = ", ".join(sorted(ACTION_MAP.keys())) + \
-                ", volume_set, type_text, press_key, reload_n"
+                ", volume_set, brightness_set, type_text, press_key, reload_n"
 
     prompt = f"""You are an intent detector for a computer control assistant.
 The user issued a command (possibly in any language): "{description}"
 Available actions: {available}
 Return ONLY a valid JSON object: {{"action": "action_name", "value": null_or_value}}
 Rules:
-- For volume_set: value is an integer 0-100.
+- For volume_set / brightness_set: value is an integer 0-100.
 - For type_text: value is the exact text to type.
 - For press_key: value is the key name (e.g. "f5", "tab", "enter").
 - For reload_n: value is an integer.
@@ -607,6 +682,15 @@ def computer_settings(
             value = detected.get("value")
 
     action = raw_action.lower().strip().replace(" ", "_").replace("-", "_")
+    action = _ALIASES.get(action, action)
+
+    known = set(ACTION_MAP) | {"volume_set", "brightness_set", "type_text", "write_on_screen", "type",
+                               "write", "press_key", "reload_n", "refresh_n", "reload_page_n"}
+    if action not in known and (description or raw_action):
+        detected = _detect_action(description or raw_action)
+        action   = _ALIASES.get(str(detected.get("action", "")), str(detected.get("action", "")))
+        if value is None:
+            value = detected.get("value")
 
     if not action:
         return "No action could be determined."
@@ -623,12 +707,14 @@ def computer_settings(
                 f"Please confirm by calling again with confirmed=yes."
             )
 
-    if action == "volume_set":
+    if action in ("volume_set", "brightness_set"):
+        if value is None or not str(value).strip("% ").isdigit():
+            return f"{action} needs a value from 0 to 100."
+        setter = volume_set if action == "volume_set" else brightness_set
         try:
-            volume_set(int(value or 50))
-            return f"Volume set to {value}%."
+            return setter(int(str(value).strip("% "))) or f"{action} to {value}% sent."
         except Exception as e:
-            return f"Could not set volume: {e}"
+            return f"Could not {action.replace('_', ' ')}: {e}"
 
     if action in ("type_text", "write_on_screen", "type", "write"):
         text = str(value or params.get("text", "")).strip()
@@ -665,8 +751,8 @@ def computer_settings(
         return f"Unknown action: '{raw_action}'."
 
     try:
-        func()
-        return f"Done: {action}."
+        # Most actions only send a key press: say that, not that it worked.
+        return func() or f"Sent {action}; effect not verified."
     except Exception as e:
         print(f"[Settings] Action failed ({action}): {e}")
         return f"Action failed ({action}): {e}"

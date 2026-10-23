@@ -1,6 +1,7 @@
 import json
 import sys
 import time
+import threading
 import base64
 import logging
 from pathlib import Path
@@ -78,29 +79,33 @@ RETRY_DELAY           = 2    # seconds between retries
 RATE_LIMIT_COOLDOWN   = 60   # seconds before retrying a rate-limited model
 
 _rate_limited: dict[str, float] = {}
+_rl_lock = threading.Lock()
 
 class OpenRouterClient:
 
-    def __init__(self) -> None:
-        self.api_key  = _load_api_key()
-        self._headers = {
-            "Authorization": f"Bearer {self.api_key}",
+    @property
+    def _headers(self) -> dict:
+        # Read the key on use, not at import: importing this module must never crash without a key.
+        return {
+            "Authorization": f"Bearer {_load_api_key()}",
             "Content-Type":  "application/json",
-            "HTTP-Referer":  "https://github.com/mark-xxv",
-            "X-Title":       "MARK XXV",
+            "HTTP-Referer":  "https://github.com/jarvis",
+            "X-Title":       "JARVIS",
         }
 
     def _is_rate_limited(self, model: str) -> bool:
-        ts = _rate_limited.get(model)
-        if ts is None:
-            return False
-        if time.time() - ts > RATE_LIMIT_COOLDOWN:
-            del _rate_limited[model]
-            return False
-        return True
+        with _rl_lock:
+            ts = _rate_limited.get(model)
+            if ts is None:
+                return False
+            if time.time() - ts > RATE_LIMIT_COOLDOWN:
+                del _rate_limited[model]
+                return False
+            return True
 
     def _mark_rate_limited(self, model: str) -> None:
-        _rate_limited[model] = time.time()
+        with _rl_lock:
+            _rate_limited[model] = time.time()
         logger.warning(
             f"[OpenRouter] Rate limited: {model} — "
             f"cooling down for {RATE_LIMIT_COOLDOWN}s"
@@ -135,6 +140,8 @@ class OpenRouterClient:
                 if resp.status_code == 429:
                     self._mark_rate_limited(model)
                     return None
+                if resp.status_code in (401, 402, 403):   # bad key / no credit: no other model will work
+                    raise PermissionError(f"OpenRouter rejected the request (HTTP {resp.status_code}). Check openrouter_api_key.")
 
                 if resp.status_code == 200:
                     data    = resp.json()
@@ -155,6 +162,8 @@ class OpenRouterClient:
                     f"[OpenRouter] {model} → Timeout "
                     f"(attempt {attempt}/{MAX_RETRIES_PER_MODEL})"
                 )
+            except PermissionError:
+                raise
             except Exception as e:
                 logger.error(f"[OpenRouter] {model} → Unexpected error: {e}")
 
@@ -187,7 +196,8 @@ class OpenRouterClient:
             logger.info(f"[OpenRouter] Trying: {m}")
             result = self._call(m, messages, max_tokens, temperature, response_format)
             if result:
-                logger.info(f"[OpenRouter] ✓ Success: {m}")
+                if m != (model or pool[0]):
+                    logger.warning(f"[OpenRouter] FALLBACK: answered by {m} (first choice {model or pool[0]} failed)")
                 return result
 
         raise RuntimeError(
@@ -195,62 +205,17 @@ class OpenRouterClient:
             "Check your API key and network connection."
         )
 
-    def chat(
-        self,
-        prompt: str,
-        system: str = (
-            "You are a component of MARK XXV, an AI assistant inspired by JARVIS. "
-            "Be concise, helpful, and precise."
-        ),
-        model: Optional[str] = None,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
-        temperature: float = DEFAULT_TEMPERATURE,
-    ) -> str:
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": prompt},
-        ]
-        return self._call_with_fallback(
-            TEXT_MODELS, messages, model, max_tokens, temperature
-        )
+    def chat(self, prompt: str, system: str = "", model: Optional[str] = None,
+             max_tokens: int = DEFAULT_MAX_TOKENS, temperature: float = DEFAULT_TEMPERATURE) -> str:
+        """Text call on the provider selected in setup (model/temperature kept for old callers)."""
+        from agent.llm import complete
+        return complete(prompt, system=system, max_tokens=max_tokens)
 
-    def chat_json(
-        self,
-        prompt: str,
-        system: str = (
-            "Return ONLY valid JSON. "
-            "No markdown fences, no extra text, no explanation."
-        ),
-        model: Optional[str] = None,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
-    ) -> dict:
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": prompt},
-        ]
-        raw = self._call_with_fallback(
-            TEXT_MODELS, messages, model, max_tokens, temperature=0.2
-        )
-
-        clean = raw.strip()
-        if clean.startswith("```"):
-            parts = clean.split("```")
-            clean = parts[1] if len(parts) > 1 else clean
-            if clean.startswith("json"):
-                clean = clean[4:]
-        clean = clean.strip().rstrip("`").strip()
-
-        try:
-            return json.loads(clean)
-        except json.JSONDecodeError as e:
-            logger.error(
-                f"[OpenRouter] JSON parse failed: {e}\n"
-                f"Raw response (first 300 chars): {raw[:300]}"
-            )
-            raise ValueError(
-                f"Model returned unparseable JSON: {e}\n"
-                f"Raw output: {raw[:200]}"
-            )
+    def chat_json(self, prompt: str, system: str = "Return ONLY valid JSON. No markdown fences, no extra text.",
+                  model: Optional[str] = None, max_tokens: int = DEFAULT_MAX_TOKENS):
+        """chat() parsed as JSON; raises ValueError on bad output."""
+        from agent.llm import complete_json
+        return complete_json(prompt, system=system, max_tokens=max_tokens)
 
     def vision(
         self,
@@ -328,7 +293,7 @@ client = OpenRouterClient()
 
 if __name__ == "__main__":
     print("=" * 55)
-    print("  MARK XXV — OpenRouter Client Self-Test")
+    print("  JARVIS — OpenRouter Client Self-Test")
     print("=" * 55)
 
     print("\n[TEST 1] Basic chat...")

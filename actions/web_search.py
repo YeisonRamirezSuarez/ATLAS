@@ -1,42 +1,15 @@
 #web_search.py
-import json
-import sys
-from pathlib import Path
+import re
+from datetime import date
 
-def _get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+from agent.llm import complete
 
-
-BASE_DIR        = _get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
-
-
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
-
-def _gemini_search(query: str) -> str:
-    from google import genai
-
-    client   = genai.Client(api_key=_get_api_key())
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=query,
-        config={"tools": [{"google_search": {}}]},
-    )
-
-    text = ""
-    for part in response.candidates[0].content.parts:
-        if hasattr(part, "text") and part.text:
-            text += part.text
-
-    text = text.strip()
-    if not text:
-        raise ValueError("Gemini returned an empty response.")
-    return text
+# Queries about current events go to news search first, limited to the past week.
+_TIME_SENSITIVE = re.compile(
+    r"\b(news|noticias?|today|hoy|latest|[uú]ltim[oa]s?|recent|recientes?|now|ahora|current|actual|"
+    r"yesterday|ayer|this week|esta semana|price|precio|cotizaci[oó]n|score|marcador|resultados?)\b",
+    re.I,
+)
 
 
 def _ddg_search(query: str, max_results: int = 6) -> list[dict]:
@@ -45,54 +18,69 @@ def _ddg_search(query: str, max_results: int = 6) -> list[dict]:
     except ImportError:
         from duckduckgo_search import DDGS
 
-    results = []
+    fresh = bool(_TIME_SENSITIVE.search(query))
+    kw = {"max_results": max_results, "region": "es-es", "timelimit": "w" if fresh else None}
     with DDGS() as ddgs:
-        for r in ddgs.text(query, max_results=max_results):
-            results.append({
-                "title":   r.get("title",  ""),
-                "snippet": r.get("body",   ""),
-                "url":     r.get("href",   ""),
-            })
+        first, second = (ddgs.news, ddgs.text) if fresh else (ddgs.text, ddgs.news)
+        # Either search sometimes comes back empty at random; the other one is the fallback.
+        try:
+            raw = first(query, **kw)
+        except Exception:
+            raw = []
+        if not raw:
+            raw = second(query, **kw)
+
+    results = []
+    for r in raw:
+        url, when = r.get("href") or r.get("url"), r.get("date") or ""
+        if not url:  # unciteable
+            continue
+        results.append({
+            "title":   r.get("title", ""),
+            "snippet": r.get("body", ""),
+            "url":     url,
+            # ddgs dates are ISO strings; keep just the day. Never invent one.
+            "date":    when[:10] if re.match(r"\d{4}-\d{2}-\d{2}", when) else when,
+        })
     return results
 
 
-def _format_ddg(query: str, results: list[dict]) -> str:
+def _format(query: str, results: list[dict]) -> str:
     if not results:
-        return f"No results found for: {query}"
+        return f"Could not find any web results for: {query}"
 
-    lines = [f"Search results for: {query}\n"]
+    lines = [f"Web results for: {query} (retrieved {date.today().isoformat()}). Cite them by number.\n"]
     for i, r in enumerate(results, 1):
-        if r.get("title"):   lines.append(f"{i}. {r['title']}")
-        if r.get("snippet"): lines.append(f"   {r['snippet']}")
-        if r.get("url"):     lines.append(f"   {r['url']}")
-        lines.append("")
-    return "\n".join(lines).strip()
+        when = f"date: {r['date']}" if r.get("date") else "date unknown"
+        lines.append(f"{i}. {r['title'] or 'Untitled'} — {r['snippet']} (source: {r['url']}, {when})")
+    return "\n".join(lines)
+
 
 def _compare(items: list[str], aspect: str) -> str:
-    query = (
-        f"Compare {', '.join(items)} in terms of {aspect}. "
-        "Give specific facts and data."
-    )
-    try:
-        return _gemini_search(query)
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ Gemini compare failed: {e} — falling back to DDG")
-
-    # DDG fallback: fetch results per item and merge
-    all_results: dict[str, list] = {}
+    results = []
     for item in items:
         try:
-            all_results[item] = _ddg_search(f"{item} {aspect}", max_results=3)
-        except Exception:
-            all_results[item] = []
+            results += _ddg_search(f"{item} {aspect}", max_results=3)
+        except Exception as e:
+            print(f"[WebSearch] ⚠️ DDG failed for {item!r}: {e}")
 
-    lines = [f"Comparison — {aspect.upper()}", "─" * 40]
-    for item in items:
-        lines.append(f"\n▸ {item}")
-        for r in all_results.get(item, [])[:2]:
-            if r.get("snippet"):
-                lines.append(f"  • {r['snippet']}")
-    return "\n".join(lines)
+    sources = _format(f"{', '.join(items)} — {aspect}", results)
+    if not results:
+        return sources
+    try:
+        return complete(
+            f"Compare {', '.join(items)} in terms of {aspect} using ONLY these web results:\n\n{sources}",
+            system=(
+                "Give specific facts and figures. Cite every fact with its source number, e.g. [2]. "
+                "Keep each source's date ('date unknown' when it has none). "
+                "End with the numbered sources you used: title, URL, date."
+            ),
+            fast=True,
+        )
+    except Exception as e:
+        print(f"[WebSearch] ⚠️ LLM compare failed ({e}) — returning raw sources")
+        return sources
+
 
 def web_search(
     parameters:     dict,
@@ -116,22 +104,15 @@ def web_search(
         player.write_log(f"[Search] {query or ', '.join(items)}")
 
     print(f"[WebSearch] 🔍 Query: {query!r}  Mode: {mode}")
-# replace: result = _gemini_search(query) block with:
+
+    if mode == "compare":
+        return _compare(items or [query], aspect)
+
+    # DuckDuckGo returns real pages with URLs and dates; the live model answers from them.
     try:
-        from or_client import client
-        result = client.chat(
-            query,
-            system="You are a web search assistant. Answer factually and concisely."
-        )
-        print("[WebSearch] ✅ OpenRouter OK.")
-        return result
-    except Exception as e:
-        print(f"[WebSearch] ⚠️ OpenRouter failed ({e}) — trying DDG...")
         results = _ddg_search(query)
-        result  = _format_ddg(query, results)
-        print(f"[WebSearch] ✅ DDG: {len(results)} result(s).")
-        return result
-    
     except Exception as e:
-        print(f"[WebSearch] ❌ All backends failed: {e}")
-        return f"Search failed, sir: {e}"
+        print(f"[WebSearch] ❌ DDG failed: {e}")
+        return f"Could not search the web for: {query} ({e})"
+    print(f"[WebSearch] ✅ DDG: {len(results)} result(s).")
+    return _format(query, results)

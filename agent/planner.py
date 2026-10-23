@@ -14,11 +14,11 @@ BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
-PLANNER_PROMPT = """You are the planning module of MARK XXV, a personal AI assistant.
+PLANNER_PROMPT = """You are the planning module of JARVIS, a personal AI assistant.
 Your job: break any user goal into a sequence of steps using ONLY the tools listed below.
 
 ABSOLUTE RULES:
-- NEVER use generated_code or write Python scripts. It does not exist.
+- Prefer the tools below. Use generated_code only when none of them can do the step.
 - NEVER reference previous step results in parameters. Every step is independent.
 - Use web_search for ANY information retrieval, research, or current data.
 - Use file_controller to save content to disk.
@@ -115,6 +115,10 @@ code_helper
 dev_agent
   description: string (required)
   language: string (optional)
+
+generated_code
+  description: string (required) — what to achieve; a Python script is written and run for it,
+  reusing scripts that worked before. Last resort when no tool above fits.
 EXAMPLES:
 
 Goal: "research mechanical engineering and save it to a notepad file"
@@ -172,40 +176,28 @@ OUTPUT — return ONLY valid JSON, no markdown, no explanation, no code blocks:
 """
 
 
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+def _valid(plan) -> dict:
+    """Raises ValueError unless every step names a tool; fills missing step numbers."""
+    if not isinstance(plan, dict) or not isinstance(plan.get("steps"), list):
+        raise ValueError("Invalid plan structure")
+    for i, s in enumerate(plan["steps"], 1):
+        if not isinstance(s, dict) or not s.get("tool"):
+            raise ValueError(f"Step {i} has no tool")
+        s.setdefault("step", i)
+        s.setdefault("description", "")
+        s.setdefault("parameters", {})
+    return plan
 
 
 def create_plan(goal: str, context: str = "") -> dict:
-    import google.generativeai as genai
-
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash-lite",
-        system_instruction=PLANNER_PROMPT
-    )
+    from agent.llm import complete_json
 
     user_input = f"Goal: {goal}"
     if context:
         user_input += f"\n\nContext: {context}"
 
     try:
-        response = model.generate_content(user_input)
-        text     = response.text.strip()
-        text     = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
-
-        plan = json.loads(text)
-
-        if "steps" not in plan or not isinstance(plan["steps"], list):
-            raise ValueError("Invalid plan structure")
-
-        for step in plan["steps"]:
-            if step.get("tool") in ("generated_code",):
-                print(f"[Planner] ⚠️ generated_code detected in step {step.get('step')} — replacing with web_search")
-                desc = step.get("description", goal)
-                step["tool"] = "web_search"
-                step["parameters"] = {"query": desc[:200]}
+        plan = _valid(complete_json(user_input, system=PLANNER_PROMPT, fast=True))
 
         print(f"[Planner] ✅ Plan: {len(plan['steps'])} steps")
         for s in plan["steps"]:
@@ -213,16 +205,14 @@ def create_plan(goal: str, context: str = "") -> dict:
 
         return plan
 
-    except json.JSONDecodeError as e:
-        print(f"[Planner] ⚠️ JSON parse failed: {e}")
-        return _fallback_plan(goal)
     except Exception as e:
         print(f"[Planner] ⚠️ Planning failed: {e}")
         return _fallback_plan(goal)
 
 
 def _fallback_plan(goal: str) -> dict:
-    print("[Planner] 🔄 Fallback plan")
+    # Visible fallback: a single search step, logged, never a silent provider switch.
+    print("[Planner] 🔄 Fallback plan: planning failed, falling back to one web_search step")
     return {
         "goal": goal,
         "steps": [
@@ -238,16 +228,10 @@ def _fallback_plan(goal: str) -> dict:
 
 
 def replan(goal: str, completed_steps: list, failed_step: dict, error: str) -> dict:
-    import google.generativeai as genai
-
-    genai.configure(api_key=_get_api_key())
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        system_instruction=PLANNER_PROMPT
-    )
+    from agent.llm import complete_json
 
     completed_summary = "\n".join(
-        f"  - Step {s['step']} ({s['tool']}): DONE" for s in completed_steps
+        f"  - Step {s.get('step')} ({s.get('tool')}): DONE" for s in completed_steps
     )
 
     prompt = f"""Goal: {goal}
@@ -261,15 +245,7 @@ Error: {error}
 Create a REVISED plan for the remaining work only. Do not repeat completed steps."""
 
     try:
-        response = model.generate_content(prompt)
-        text     = response.text.strip()
-        text     = re.sub(r"```(?:json)?", "", text).strip().rstrip("`").strip()
-        plan     = json.loads(text)
-
-        for step in plan.get("steps", []):
-            if step.get("tool") == "generated_code":
-                step["tool"] = "web_search"
-                step["parameters"] = {"query": step.get("description", goal)[:200]}
+        plan = _valid(complete_json(prompt, system=PLANNER_PROMPT))
 
         print(f"[Planner] 🔄 Revised plan: {len(plan['steps'])} steps")
         return plan

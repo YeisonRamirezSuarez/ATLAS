@@ -36,7 +36,7 @@ def _get_api_key() -> str:
 
 def _gemini_client():
     genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel("gemini-2.5-flash")
+    return genai.GenerativeModel("gemini-flash-latest")
 
 
 def _detect_type(path: Path) -> str:

@@ -40,7 +40,12 @@ def _load_config() -> dict:
         return {}
 
 def _get_os() -> str:
-    return _load_config().get("os_system", "windows").lower()
+    from config import get_os
+    return get_os()
+
+def _mod() -> str:
+    """Shortcut modifier: Cmd on macOS, Ctrl elsewhere."""
+    return "command" if _get_os() == "mac" else "ctrl"
 
 _SAFE_SCREENSHOT_ROOTS = (
     Path.home(),
@@ -142,6 +147,8 @@ def _user_profile() -> dict:
 def _type(text: str, interval: float = 0.03) -> str:
     _require_pyautogui()
     time.sleep(0.3)
+    if not text.isascii():
+        return _clipboard_paste(text)
     pyautogui.typewrite(text, interval=interval)
     return f"Typed: {text[:60]}{'…' if len(text) > 60 else ''}"
 
@@ -152,10 +159,10 @@ def _smart_type(text: str, clear_first: bool = True) -> str:
         _clear_field()
         time.sleep(0.1)
 
-    if len(text) > 20 and _PYPERCLIP:
+    if (len(text) > 20 or not text.isascii()) and _PYPERCLIP:
         pyperclip.copy(text)
         time.sleep(0.1)
-        pyautogui.hotkey("ctrl", "v")
+        pyautogui.hotkey(_mod(), "v")
         return f"Smart-typed (clipboard): {text[:60]}{'…' if len(text) > 60 else ''}"
 
     pyautogui.typewrite(text, interval=0.04)
@@ -207,7 +214,7 @@ def _drag(x1: int, y1: int, x2: int, y2: int, duration: float = 0.5) -> str:
 def _clipboard_get() -> str:
     if _PYPERCLIP:
         return pyperclip.paste()
-    _hotkey("ctrl", "c")
+    _hotkey(_mod(), "c")
     time.sleep(0.2)
     return "(copied — pyperclip unavailable for read)"
 
@@ -217,9 +224,9 @@ def _clipboard_paste(text: str) -> str:
         pyperclip.copy(text)
         time.sleep(0.1)
         _require_pyautogui()
-        pyautogui.hotkey("ctrl", "v")
+        pyautogui.hotkey(_mod(), "v")
         return f"Pasted: {text[:60]}{'…' if len(text) > 60 else ''}"
-    return "pyperclip not available"
+    return "Could not paste: pyperclip is not installed (needed for non-ASCII text)."
 
 
 def _screenshot(save_path: str | None = None) -> str:
@@ -232,7 +239,7 @@ def _screenshot(save_path: str | None = None) -> str:
 
 def _clear_field() -> str:
     _require_pyautogui()
-    pyautogui.hotkey("ctrl", "a")
+    pyautogui.hotkey(_mod(), "a")
     time.sleep(0.1)
     pyautogui.press("delete")
     return "Field cleared"
@@ -320,7 +327,15 @@ def _screen_find(description: str) -> tuple[int, int] | None:
         print(f"[ComputerControl] ⚠️ screen_find failed: {e}")
     return None
 
-def computer_control(
+def computer_control(parameters: dict, response=None, player=None, session_memory=None) -> str:
+    result = _computer_control(parameters, response, player, session_memory)
+    from config import is_wayland
+    if is_wayland() and isinstance(result, str) and not result.startswith(("Could not", "Error", "Failed")):
+        result += " (Wayland session: PyAutoGUI input only reaches X11/XWayland windows; effect not verified.)"
+    return result
+
+
+def _computer_control(
     parameters: dict,
     response=None,
     player=None,
