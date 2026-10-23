@@ -105,6 +105,11 @@ flight_finder
   destination: string (required)
   date: string (required)
 
+ble_light — Bluetooth LED controller SP621E (BanlanX); the result says if the controller confirmed it
+  action: "color" | "on" | "off" | "status" | "scan" (required)
+  color: string (for color: English/Spanish name or #RRGGBB)
+  address: string (optional; default: first SP621E found)
+
 code_helper
   action: "write" | "edit" | "run" | "explain" (required)
   description: string (required)

@@ -1,4 +1,4 @@
-# 🤖 J.A.R.V.I.S
+# 🤖 JARVIS
 
 ### Asistente personal de voz con IA para Windows, macOS y Linux
 
@@ -44,9 +44,12 @@ Al abrir JARVIS por primera vez, pulsa **CONFIG** y pon tus claves de API (ver [
 | 🛠️ | **Aprende habilidades** | Si no tiene una herramienta, escribe un script, lo prueba y lo guarda para la próxima vez. Pide confirmación antes de cualquier acción riesgosa. |
 | 👁️ | **Visión** | Analiza tu pantalla y la cámara. |
 | 📧 | **Correo** | Lee, busca, redacta y responde (Outlook / Microsoft 365, Gmail, IMAP). Solo envía después de tu "sí". |
+| 💡 | **Luces Bluetooth** | Controla el controlador LED SP621E (BanlanX) por Bluetooth: color, encendido y apagado. Solo dice que funcionó cuando el controlador lo confirma. Protocolo de [UniLED](https://github.com/monty68/uniled) (MIT). |
+| 🔎 | **Sabe lo que puede hacer** | Revisa en vivo qué herramientas funcionan en tu equipo antes de prometer algo. Si un script falla, busca en la web y lo intenta de otra forma. |
 | 💬 | **Mensajes y música** | Telegram, WhatsApp, YouTube y Apple Music. |
 | 📂 | **Archivos** | Arrastra PDFs, código, Word, Excel o imágenes para resumirlos, analizarlos o editarlos. |
 | 💾 | **Memoria** | Recuerda tus preferencias y proyectos entre conversaciones. |
+| 🎭 | **Personalidad** | Humor seco cuando encaja y serio cuando hace falta: sin bromas en errores, urgencias o si estás molesto. Pídele "menos sarcasmo", "más formal" o "respuestas cortas" y lo recuerda. |
 | ⌨️ | **Voz o texto** | Escríbele cuando quieras, incluso mientras habla: responde al terminar. |
 
 ---
@@ -154,6 +157,7 @@ Construye el instalador del sistema donde lo ejecutas, en `dist/`. En Windows ne
 | **Micrófono** | Para hablarle (por texto funciona sin él) |
 | **Claves** | Al menos una: Gemini (gratis) o el motor que elijas |
 | **Espacio** | ~2 GB instalado |
+| **Bluetooth** | Opcional, para luces LED (Bluetooth LE) |
 
 ---
 

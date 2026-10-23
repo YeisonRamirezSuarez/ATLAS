@@ -21,7 +21,8 @@ from ui import JarvisUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     should_extract_memory, extract_memory, search_memory,
-    save_conversation, recent_memories
+    save_conversation, recent_memories,
+    STYLE_OPTIONS, set_style, format_style_for_prompt
 )
 
 from actions.file_processor import file_processor
@@ -43,6 +44,7 @@ from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
+from actions.ble_light         import ble_light
 
 
 def get_base_dir():
@@ -193,6 +195,27 @@ TOOL_DECLARATIONS = [
             },
             "required": ["city"]
         }
+    },
+    {
+        "name": "ble_light",
+        "description": "Controls a Bluetooth LED controller SP621E (BanlanX): connects over Bluetooth, sets "
+                       "a solid color or power, and reads the state back. Only say it worked when the "
+                       "result starts with 'Verified'.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":  {"type": "STRING", "description": "color | on | off | status | scan"},
+                "color":   {"type": "STRING", "description": "For color: a color name (e.g. purple, morado) or #RRGGBB"},
+                "address": {"type": "STRING", "description": "Bluetooth address; omit to use the first SP621E found"}
+            },
+            "required": ["action"]
+        }
+    },
+    {
+        "name": "capabilities",
+        "description": "Checks live which tools work on this computer (code and packages load), the OS and "
+                       "the number of learned skills. Use it before promising a capability.",
+        "parameters": {"type": "OBJECT", "properties": {}}
     },
     {
         "name": "send_message",
@@ -679,6 +702,27 @@ TOOL_DECLARATIONS = [
             "required": ["query"]
         }
     },
+    {
+        "name": "set_style",
+        "description": (
+            "Show, change or reset how you talk to the user: humor, tone, formality, detail. "
+            "Call it ONLY when the user asks (e.g. 'less sarcasm', 'be more formal', 'shorter answers', "
+            "'what style do you use with me?', 'go back to normal'). Never call it on your own guess."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":     {"type": "STRING", "description": "set | show | reset (back to defaults)"},
+                "humor":      {"type": "STRING", "description": "off | low | normal | high"},
+                "tone":       {"type": "STRING", "description": "usual | professional | witty | focus | empathic"},
+                "formality":  {"type": "STRING", "description": "casual | normal | formal"},
+                "detail":     {"type": "STRING", "description": "brief | normal | detailed (answer length)"},
+                "work_humor": {"type": "STRING", "description": "off | low | normal (humor during work tasks)"},
+                "updates":    {"type": "STRING", "description": "minimal | normal | detailed (progress notices)"},
+            },
+            "required": ["action"]
+        }
+    },
 ]
 
 
@@ -778,6 +822,8 @@ class JarvisLive:
         parts = [time_ctx]
         if mem_str:
             parts.append(mem_str)
+        if style := format_style_for_prompt(memory):
+            parts.append(style)
         if recent := recent_memories():
             parts.append(recent)
         parts.append(sys_prompt)
@@ -842,6 +888,14 @@ class JarvisLive:
 
             elif name == "weather_report":
                 r = await self._run_blocking(name, lambda: weather_action(parameters=args, player=self.ui))
+                result = _honest(name, r)
+
+            elif name == "capabilities":
+                from agent.executor import tool_status
+                result = _honest(name, await self._run_blocking(name, tool_status))
+
+            elif name == "ble_light":
+                r = await self._run_blocking(name, lambda: ble_light(parameters=args, player=self.ui))
                 result = _honest(name, r)
 
             elif name == "browser_control":
@@ -947,6 +1001,12 @@ class JarvisLive:
 
             elif name == "search_memory":
                 result = await self._run_blocking(name, lambda: search_memory(args.get("query", "")))
+            elif name == "set_style":
+                action  = str(args.get("action", "show")).lower()
+                changes = {} if action == "show" else {k: v for k, v in args.items() if k in STYLE_OPTIONS}
+                result  = set_style(changes, reset=action == "reset")
+                if action != "show":
+                    result += " Saved. Apply it from your next reply on."
             elif name == "jarvis_microphone":
                 mute = str(args.get("mute", "yes")).lower() in ("yes", "true", "1")
                 self.ui.muted = mute

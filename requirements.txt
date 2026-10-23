@@ -36,3 +36,4 @@ miniaudio
 vosk
 telethon
 msal
+bleak

@@ -70,10 +70,14 @@ BUILTIN_SKILLS_DIR = BASE_DIR / "memory" / "builtin_skills"   # shipped with the
 
 
 def save_skill(goal: str, plan: str, code: str) -> None:
+    """Saves a script that ran and checked its own result. Never overwrites: each version is a new
+    file, so an older one is still there to go back to. The output is not stored (it may be personal)."""
+    import platform
     SKILLS_DIR.mkdir(exist_ok=True)
     name = f"{re.sub(r'[^a-z0-9]+', '_', goal.lower()).strip('_')[:40]}_{datetime.now():%Y%m%d%H%M%S}.py"
-    (SKILLS_DIR / name).write_text(code, encoding="utf-8")
-    _engram_save_async(f"skill: {goal[:80]}", f"file: {name}\n{plan}\nTask: {goal}", "skill")
+    verified = f"# VERIFIED: {datetime.now():%Y-%m-%d} on {platform.system()} {platform.version()}"
+    (SKILLS_DIR / name).write_text(f"{code.rstrip()}\n{verified}\n", encoding="utf-8")
+    _engram_save_async(f"skill: {goal[:80]}", f"file: {name}\n{plan}\n{verified[2:]}\nTask: {goal}", "skill")
 
 
 def find_skills(goal: str, limit: int = 3) -> list[tuple[str, str]]:
@@ -388,6 +392,50 @@ def format_memory_for_prompt(memory: dict | None) -> str:
         result = result[:1997] + "…"
 
     return result + "\n"
+
+
+STYLE_OPTIONS = {
+    "humor":      ("off", "low", "normal", "high"),
+    "tone":       ("usual", "professional", "witty", "focus", "empathic"),
+    "formality":  ("casual", "normal", "formal"),
+    "detail":     ("brief", "normal", "detailed"),
+    "work_humor": ("off", "low", "normal"),
+    "updates":    ("minimal", "normal", "detailed"),
+}
+
+
+def set_style(changes: dict, reset: bool = False) -> str:
+    """How the user wants JARVIS to talk, set only on request. Kept apart from personal
+    facts and skills, as plain strings so the size trim never drops it and Engram never gets it."""
+    bad = []
+    with _update_lock:
+        memory = load_memory()
+        style  = {} if reset else dict(memory.get("style") or {})
+        for key, val in (changes or {}).items():
+            val = str(val or "").strip().lower()
+            if not val:
+                continue
+            if val in STYLE_OPTIONS.get(key, ()):
+                style[key] = val
+            else:
+                bad.append(f"{key}={val}")
+        if style != memory.get("style", {}):
+            memory["style"] = style
+            save_memory(memory)
+    msg = f"Style now: {', '.join(f'{k}={v}' for k, v in style.items()) or 'defaults'}."
+    if bad:
+        allowed = "; ".join(f"{k}: {'/'.join(v)}" for k, v in STYLE_OPTIONS.items())
+        msg += f" Rejected {', '.join(bad)}. Allowed: {allowed}."
+    return msg
+
+
+def format_style_for_prompt(memory: dict | None) -> str:
+    style = (memory or {}).get("style") or {}
+    if not style:
+        return ""
+    lines = "\n".join(f"  - {k.replace('_', ' ')}: {v}" for k, v in style.items())
+    return ("[STYLE THE USER ASKED FOR — follow it over the defaults; the no-humor cases and "
+            "warnings still win]\n" + lines + "\n")
 
 
 def remember(key: str, value: str, category: str = "notes") -> str:

@@ -10,17 +10,13 @@ Todo viene incluido: Python, librerías, Chromium y el modelo de la palabra de a
 
 Instrucciones completas en el [README](https://github.com/pablo29855/Jarvis-#readme).
 
-## ✨ Novedades
+## ✨ Novedades en 2.2.0
 
-- 🧠 Cerebro Claude (API o suscripción Pro/Max) y elección de motor y modelo desde CONFIG.
-- 👂 Palabra de activación "Jarvis" local, sin internet.
-- 🛰️ HUD de tareas en segundo plano: qué está haciendo cada tarea y en qué paso va.
-- 🌎 Siempre responde en el idioma en que le hablas, también en tareas en segundo plano.
-- ⌨️ Si le escribes mientras habla, responde al terminar en vez de ignorar el mensaje.
-- 🎙️ JARVIS puede silenciar su propio micrófono cuando se lo pides.
-- 🛠️ Habilidades aprendidas: si un script aprobado falla, la corrección corre sin volver a pedir confirmación.
-- 📧 Correo (Outlook / Microsoft 365, Gmail, IMAP), Apple Music y actualizador.
-- 📦 Instaladores para Windows, macOS y Linux.
+- 🎭 **Personalidad:** humor seco cuando encaja y serio cuando hace falta. No hace bromas en errores, urgencias ni cuando estás molesto. Nunca finge emociones ni acciones.
+- 🎚️ **Estilo a tu gusto:** pídele "menos sarcasmo", "más formal" o "respuestas cortas" y lo recuerda. "Vuelve a lo normal" lo restablece.
+- 💡 **Luces Bluetooth:** controla el controlador LED SP621E (BanlanX): color, encendido y apagado. Solo dice que funcionó si el controlador lo confirma.
+- 🔎 **Sabe lo que puede hacer:** pregúntale qué herramientas tiene disponibles en tu equipo.
+- 🛠️ **Aprende mejor:** si un script falla, busca en la web antes de reintentar. Cada habilidad guardada anota cuándo y en qué sistema se verificó.
 
 ---
 Basado en [MARK XXXIX-OR](https://github.com/FatihMakes/Mark-XXXIX-OR) de [FatihMakes](https://www.youtube.com/@FatihMakes). Licencia [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).

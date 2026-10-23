@@ -155,6 +155,7 @@ exec "$R/python/bin/python3" "$D/jarvis.pyw"
 <key>CFBundleShortVersionString</key><string>{VERSION}</string>
 <key>NSMicrophoneUsageDescription</key><string>JARVIS listens to your voice commands.</string>
 <key>NSAppleEventsUsageDescription</key><string>JARVIS controls apps on request.</string>
+<key>NSBluetoothAlwaysUsageDescription</key><string>JARVIS controls Bluetooth lights on request.</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 """)

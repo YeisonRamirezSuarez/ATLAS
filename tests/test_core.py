@@ -127,7 +127,8 @@ class ExecutorTests(unittest.TestCase):
         results = iter([(False, "Traceback: boom"), (True, "ok")])
         with mock.patch.object(executor, "_run_script", side_effect=lambda c: next(results)), \
              mock.patch.object(memory_manager, "find_skills", return_value=[]), \
-             mock.patch.object(memory_manager, "save_skill"):
+             mock.patch.object(memory_manager, "save_skill"), \
+             mock.patch.object(executor, "_research", return_value=""):
             executor._pending = ("kill x", first)
             with mock.patch.object(executor, "_write_script", return_value=fix):
                 self.assertEqual(executor.solve_task("kill x", confirmed=True), "ok")
@@ -137,6 +138,26 @@ class ExecutorTests(unittest.TestCase):
                 with self.assertRaises(executor.NeedsConfirmation):   # a new kind of risk still asks
                     executor.solve_task("kill x", confirmed=True)
         executor._pending = None
+
+    def test_failed_attempt_researches_once_and_research_errors_do_not_block(self):
+        results = iter([(False, "ModuleNotFoundError: x"), (False, "boom"), (True, "done")])
+        seen = []
+
+        def write(goal, skills, failed, research=""):
+            seen.append(research)
+            return "# PLAN: print\nprint(1)"
+        with mock.patch.object(executor, "_write_script", side_effect=write), \
+             mock.patch.object(executor, "_run_script", side_effect=lambda c: next(results)), \
+             mock.patch.object(memory_manager, "find_skills", return_value=[]), \
+             mock.patch.object(memory_manager, "save_skill"), \
+             mock.patch("actions.web_search._ddg_search",
+                        return_value=[{"title": "T", "snippet": "use y", "url": "https://e.x"}]) as ddg:
+            self.assertEqual(executor.solve_task("do x"), "done")
+        self.assertEqual(ddg.call_count, 1)
+        self.assertEqual(seen[0], "")
+        self.assertIn("https://e.x", seen[1])
+        with mock.patch("actions.web_search._ddg_search", side_effect=OSError("offline")):
+            self.assertEqual(executor._research("do x", "err"), "")
 
 
 class TaskQueueTests(unittest.TestCase):
@@ -181,6 +202,41 @@ class MemoryTests(unittest.TestCase):
         home = str(Path.home()).lower()
         for f in memory_manager.BUILTIN_SKILLS_DIR.glob("*.py"):
             self.assertNotIn(home, f.read_text(encoding="utf-8").lower(), f.name)
+
+    def test_saved_skill_records_verification_and_keeps_old_versions(self):
+        with mock.patch.object(memory_manager, "SKILLS_DIR", Path(self.dir.name) / "skills"), \
+             mock.patch.object(memory_manager, "_engram_save_async") as engram, \
+             mock.patch.object(memory_manager, "datetime") as clock:
+            from datetime import datetime
+            for second in (1, 2):
+                clock.now.return_value = datetime(2026, 10, 23, 10, 0, second)
+                memory_manager.save_skill("show ram", "# PLAN: print ram", "# PLAN: print ram\nprint(1)")
+            files = sorted((Path(self.dir.name) / "skills").glob("*.py"))
+        self.assertEqual(len(files), 2)
+        lines = files[0].read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[0], "# PLAN: print ram")
+        self.assertTrue(lines[-1].startswith("# VERIFIED: 2026-10-23 on "))
+        self.assertIn("VERIFIED: 2026-10-23", engram.call_args[0][1])
+
+    def test_style_persists_rejects_unknown_values_and_resets(self):
+        with mock.patch.object(memory_manager, "_engram_save_async") as engram:
+            msg = memory_manager.set_style({"humor": "LOW", "detail": "brief", "tone": "rude"})
+        self.assertIn("Rejected tone=rude", msg)
+        mem = memory_manager.load_memory()
+        self.assertEqual(mem["style"], {"humor": "low", "detail": "brief"})
+        engram.assert_not_called()
+        self.assertIn("humor: low", memory_manager.format_style_for_prompt(mem))
+        self.assertNotIn("humor", memory_manager.format_memory_for_prompt(mem))
+        self.assertEqual(memory_manager._all_entries(mem), [])   # the size trim never drops it
+        self.assertIn("humor=low", memory_manager.set_style({}))
+        memory_manager.set_style({}, reset=True)
+        self.assertEqual(memory_manager.format_style_for_prompt(memory_manager.load_memory()), "")
+
+    def test_prompt_keeps_humor_out_of_failures_and_emergencies(self):
+        text = (Path(__file__).resolve().parent.parent / "core" / "prompt.txt").read_text(encoding="utf-8")
+        for rule in ("NO humor when the user is distressed", "emergency", "you do not have human feelings",
+                     "Never let a joke delay, replace or soften a", "never present a guess as certain"):
+            self.assertIn(rule, text)
 
     def test_corrupt_file_is_kept_not_overwritten(self):
         self.path.write_text("{broken", encoding="utf-8")
