@@ -1,5 +1,6 @@
 """
-Version upgrades and update checks. JARVIS never installs or rewrites its own code: when the
+Version upgrades and update checks. JARVIS never installs releases (it rewrites its own code only on the user's
+request, agent/self_improve.py): when the
 version changes it backs up the user's data first, and it only *tells* the user about a newer
 release. Installing one stays the user's decision (run the new installer).
 

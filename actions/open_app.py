@@ -81,7 +81,36 @@ def _is_running(app_name: str) -> bool:
     return False
 
 
+def focus_existing(app_name: str) -> bool:
+    """Windows: brings an already-open window of the app to the front instead of launching it
+    again. Matches the app's own window title ("WhatsApp", "Telegram (3)", "#general - Discord"),
+    not a browser tab that only mentions it. False when no such window is open."""
+    if platform.system() != "Windows":
+        return False   # `open -a` (macOS) already reuses the running app
+    try:
+        import pygetwindow as gw
+        a = app_name.lower().removesuffix(".exe")
+        for w in gw.getWindowsWithTitle(app_name.removesuffix(".exe")):
+            t = w.title.strip().lower()
+            if not (t == a or t.startswith(a + " (") or t.endswith("- " + a)):
+                continue
+            if w.isMinimized:
+                w.restore()
+            try:
+                w.activate()
+            except Exception:   # pygetwindow raises "error 0" even when it worked; minimize+restore forces focus
+                w.minimize()
+                w.restore()
+            time.sleep(0.4)
+            return True
+    except Exception as e:
+        print(f"[open_app] ⚠️ focus failed: {e}")
+    return False
+
+
 def _launch_windows(app_name: str) -> bool:
+    if focus_existing(app_name):
+        return True
     try:
         import pyautogui
         pyautogui.PAUSE = 0.1

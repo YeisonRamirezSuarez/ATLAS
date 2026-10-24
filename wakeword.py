@@ -6,7 +6,7 @@ audio leaves the PC; once the wake word is heard the whole utterance that contai
 api_keys.json (all optional):
   "wake_word":        "auto"   # auto = on when vosk and the model are installed; true; false = always listening
   "wake_sensitivity": 0.5      # 0..1, higher fires more easily (more false positives, fewer misses)
-  "wake_window":      12       # seconds of open mic after the wake word or after JARVIS answers
+  "wake_window":      12       # seconds of open mic after the user's last word or after JARVIS answers
   "wake_model":       "models/vosk-model-small-es-0.42"
   "wake_variants":    ["jarvis", "yarvis", "harbis", ...]
 """
@@ -22,11 +22,13 @@ RATE          = 16000
 # dropped by Vosk; tools/wake_eval.py lists which ones the installed model accepts.
 VARIANTS      = ["jarvis", "yarvis", "harbis", "jarbis", "yarbis", "harvis", "llarvis"]
 MAX_UTTERANCE = 15 * RATE // 1024          # ~15 s of 1024-sample mic chunks
+PRE_ROLL      = 0.3                         # seconds kept before the wake word, for its onset
+END_SILENCE   = 13                          # quiet chunks (~0.8 s) that end what the user said
 
 
 class Detector:
-    """Vosk recognizer limited to the wake variants. feed() returns None mid-utterance,
-    then True/False when Vosk closes the utterance."""
+    """Vosk recognizer limited to the wake variants. feed() returns None mid-utterance, then,
+    when Vosk closes it, False or the second (since the first chunk fed) the wake word began."""
 
     def __init__(self, model_path: Path, variants: list[str], sensitivity: float):
         from vosk import KaldiRecognizer, Model, SetLogLevel
@@ -40,26 +42,38 @@ class Detector:
     def feed(self, pcm: bytes):
         if not self.rec.AcceptWaveform(pcm):
             return None
-        return self.match(json.loads(self.rec.Result()).get("result", []))
+        start = self.find(json.loads(self.rec.Result()).get("result", []))
+        return False if start is None else start
+
+    def find(self, words: list[dict]) -> float | None:
+        """Start time of the first variant that appears as consecutive words, each at least
+        min_conf sure; None when there is none."""
+        seq = [(w.get("word", ""), float(w.get("conf", 0)), float(w.get("start", 0))) for w in words]
+        for i in range(len(seq)):
+            for v in self.variants:
+                hit = seq[i:i + len(v)]
+                if [w for w, _, _ in hit] == v and min(c for _, c, _ in hit) >= self.min_conf:
+                    return hit[0][2]
+        return None
+
+    def finish(self):
+        """Close the utterance now and decide: False or the wake word's start time."""
+        start = self.find(json.loads(self.rec.FinalResult()).get("result", []))
+        return False if start is None else start
 
     def match(self, words: list[dict]) -> bool:
-        """True if a variant appears as consecutive words, each at least min_conf sure."""
-        seq = [(w.get("word", ""), float(w.get("conf", 0))) for w in words]
-        for v in self.variants:
-            for i in range(len(seq) - len(v) + 1):
-                hit = seq[i:i + len(v)]
-                if [w for w, _ in hit] == v and min(c for _, c in hit) >= self.min_conf:
-                    return True
-        return False
+        return self.find(words) is not None
 
 
 class WakeGate:
     """Decides which mic chunks may leave the PC."""
 
-    def __init__(self, detect, window: float = 12.0, clock=time.monotonic):
-        self.detect, self.window, self.clock = detect, float(window), clock
+    def __init__(self, detect, window: float = 12.0, clock=time.monotonic, finish=None):
+        self.detect, self.window, self.clock, self.finish = detect, float(window), clock, finish
         self.until = 0.0
-        self.utt   = deque(maxlen=MAX_UTTERANCE)   # current utterance, checked for the wake word
+        self.spoke = self.quiet = 0                # voiced / trailing quiet chunks of this utterance
+        self.utt   = deque(maxlen=MAX_UTTERANCE)   # (sample offset, chunk) of the utterance being checked
+        self.pos   = 0                             # samples given to the detector so far (its clock)
 
     def awake(self) -> bool:
         return self.clock() < self.until
@@ -67,19 +81,43 @@ class WakeGate:
     def keep_awake(self) -> None:
         self.until = self.clock() + self.window
 
-    def feed(self, pcm: bytes) -> list[bytes]:
-        """Chunks to pass on now: [] while asleep, the whole wake utterance when it fires."""
+    def feed(self, pcm: bytes, voiced: bool = False) -> list[bytes]:
+        """Chunks to pass on now: [] while asleep, the wake utterance when it fires. voiced = the
+        user is talking: the window then runs from their last word, so it never closes mid-sentence
+        (half a command stuck downstream used to come out glued to the next wake word)."""
         if self.awake():
+            if voiced:
+                self.keep_awake()
             return [pcm]
-        self.utt.append(pcm)
+        return self.listen(pcm, voiced)
+
+    def listen(self, pcm: bytes, voiced: bool | None = None) -> list[bytes]:
+        """Wake word only, awake or not: while JARVIS talks this is how the user interrupts it.
+        [] until an utterance with the wake word closes, then that utterance from the wake word
+        on: what was said before it is not a request ("...abre Chrome. Jarvis" must not open it)."""
+        self.utt.append((self.pos, pcm))
+        self.pos += len(pcm) // 2
         fired = self.detect(pcm)
+        if voiced is not None:
+            self.spoke += voiced
+            self.quiet = 0 if voiced else self.quiet + 1
+        # Vosk decides only when it hears the utterance end; steady room noise (fan, PC, echo) can
+        # hide that end for up to ~20 s, so "Jarvis, abre Chrome" sat unanswered and came out with
+        # the next "Jarvis". Once the user has been quiet ~0.8 s, it decides on what it has.
+        if fired is None and self.finish and self.spoke >= 4 and self.quiet >= END_SILENCE:
+            fired = self.finish()
         if fired is None:
             return []
-        out = list(self.utt) if fired else []
+        utt = list(self.utt)
         self.utt.clear()
-        if fired:
-            self.keep_awake()
-        return out
+        self.spoke = self.quiet = 0
+        if fired is False:
+            return []
+        self.keep_awake()
+        if fired is True or fired > self.pos / RATE:   # no time, or a clock out of step: keep it all
+            return [p for _, p in utt]
+        start = (fired - PRE_ROLL) * RATE
+        return [p for s, p in utt if s + len(p) // 2 > start]
 
 
 def make_gate(cfg: dict, log=print):
@@ -98,4 +136,4 @@ def make_gate(cfg: dict, log=print):
         log(f"SYS: Wake word unavailable ({e}); always listening.")
         return None
     log("SYS: Wake word on. Say 'Jarvis'.")
-    return WakeGate(det.feed, cfg.get("wake_window", 12))
+    return WakeGate(det.feed, cfg.get("wake_window", 12), finish=det.finish)

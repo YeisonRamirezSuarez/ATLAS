@@ -351,7 +351,7 @@ def email_client(parameters: dict, player=None, **_) -> str:
                         f"{' to ' + ', '.join(to) if to else ''}. Not sent.")
             key = (acct["name"], tuple(to), subject, body, reply_id)
             confirmed = str(p.get("confirmed", "")).lower() in ("yes", "true", "1", "confirm")
-            if not (confirmed and _pending == key):
+            if not (confirmed and _pending == key) and not p.get("_trusted"):
                 _pending = key
                 who = ", ".join(to) or "the sender of that email (reply)"
                 return (f"NEEDS CONFIRMATION. Nothing was sent. Read this to the user and ask: send from {acct['name']} "

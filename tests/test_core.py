@@ -120,6 +120,14 @@ class ExecutorTests(unittest.TestCase):
             self.assertEqual(executor.solve_task("clean temp", confirmed=True), "ok")
             self.assertEqual(ran, [risky])
 
+    def test_trusted_case_runs_risky_script_without_asking(self):
+        risky = "# PLAN: delete temp files\nimport shutil\nshutil.rmtree('x')"
+        with mock.patch.object(executor, "_write_script", return_value=risky), \
+             mock.patch.object(executor, "_run_script", return_value=(True, "ok")), \
+             mock.patch.object(memory_manager, "find_skills", return_value=[]), \
+             mock.patch.object(memory_manager, "save_skill"):
+            self.assertEqual(executor.solve_task("clean temp", trusted=True), "ok")
+
     def test_fix_of_approved_script_runs_without_asking_again(self):
         first = "# PLAN: kill it\nimport os\nos.system('taskkill /im x.exe')"
         fix   = first + "\nprint('ok')"
@@ -232,6 +240,20 @@ class MemoryTests(unittest.TestCase):
         memory_manager.set_style({}, reset=True)
         self.assertEqual(memory_manager.format_style_for_prompt(memory_manager.load_memory()), "")
 
+    def test_trusted_cases_saved_only_by_name_and_removable(self):
+        self.assertFalse(memory_manager.is_trusted("delete temp files"))
+        memory_manager.set_trusted("Delete  temp files")
+        memory_manager.set_trusted("delete temp files")   # no duplicate
+        mem = memory_manager.load_memory()
+        self.assertEqual(mem["trusted"], ["Delete temp files"])
+        self.assertTrue(memory_manager.is_trusted("delete temp files"))
+        self.assertFalse(memory_manager.is_trusted("delete all files"))
+        self.assertFalse(memory_manager.is_trusted(""))
+        self.assertIn("Delete temp files", memory_manager.format_trusted_for_prompt(mem))
+        self.assertEqual(memory_manager._all_entries(mem), [])   # the size trim never drops it
+        self.assertIn("always ask", memory_manager.set_trusted("delete temp files", remove=True))
+        self.assertEqual(memory_manager.format_trusted_for_prompt(memory_manager.load_memory()), "")
+
     def test_prompt_keeps_humor_out_of_failures_and_emergencies(self):
         text = (Path(__file__).resolve().parent.parent / "core" / "prompt.txt").read_text(encoding="utf-8")
         for rule in ("NO humor when the user is distressed", "emergency", "you do not have human feelings",
@@ -294,8 +316,8 @@ class MainToolResultTests(unittest.TestCase):
             spoke.append(text)
         j._gemini_tts, j._live_tts = quota, live
         with mock.patch.object(engines.edge_tts, "Communicate", side_effect=AssertionError("voice changed")):
-            asyncio.run(j._tts("hola"))
-            asyncio.run(j._tts("otra"))   # inside the quota window: straight to Live
+            asyncio.run(j._tts_now("hola"))
+            asyncio.run(j._tts_now("otra"))   # inside the quota window: straight to Live
         self.assertEqual(spoke, ["hola", "otra"])
         self.assertGreater(j._tts_quota_until, engines.time.time() + 500)
 
@@ -312,13 +334,14 @@ class MainToolResultTests(unittest.TestCase):
             j.speak("Task cancelled, sir.")   # translation down: still speaks
         self.assertEqual(said[-1], "Task cancelled, sir.")
 
-    def test_message_typed_while_speaking_is_answered_after(self):
+    def test_message_typed_while_speaking_interrupts_and_is_answered(self):
         import threading, engines
         j = engines.CascadeJarvis.__new__(engines.CascadeJarvis)
-        j._loop, j._busy, j._turn, j._wake, j._is_speaking = object(), False, threading.Lock(), None, False
+        j._loop, j._busy, j._turn, j._wake, j._is_speaking = mock.MagicMock(), False, threading.Lock(), None, False
+        j._epoch, j._tts_futs = 0, set()
         j.ui, speaking, heard = mock.MagicMock(muted=False), threading.Event(), []
 
-        def ask(text, run_tool, say):
+        def ask(text, run_tool, say, feed=None):
             heard.append(text)
             if text == "first":
                 speaking.set()
@@ -331,6 +354,184 @@ class MainToolResultTests(unittest.TestCase):
             j._on_text_command("second")
             t.join()
         self.assertEqual(heard, ["first", "second"])
+        j.llm.stop.assert_called_once()   # the first reply was cut, not waited for
+        self.assertEqual(j._epoch, 1)
+        j._loop.call_soon_threadsafe.assert_called_once_with(j._interrupt_now)
+
+    def test_reply_starts_speaking_at_first_sentence_without_repeating_it(self):
+        import engines
+        said = []
+        v = engines._Voice(lambda text, wait: said.append(text))
+        for delta in ("Claro, señor. Ya ", "abrí Chrome y ", "busqué el vuelo."):
+            v.feed(delta)
+        self.assertEqual(said, ["Claro, señor."])   # spoken while the model still writes
+        v.end("Claro, señor. Ya abrí Chrome y busqué el vuelo.")
+        self.assertEqual(said[1:], ["Ya abrí Chrome y busqué el vuelo."])
+        v.end("Listo.")   # nothing streamed for this message: said whole
+        self.assertEqual(said[-1], "Listo.")
+        for delta in (None, "Voy a revisar tu pantalla ahora. Un ", "momento.", None):   # text-only message, then a tool call
+            v.feed(delta)
+        self.assertEqual(said[-2:], ["Voy a revisar tu pantalla ahora.", "Un momento."])
+
+    def test_silent_slow_tool_gets_a_short_ack_on_every_engine(self):
+        import asyncio, engines
+        m = self.main
+        live = m.JarvisLive.__new__(m.JarvisLive)
+        cascade = engines.CascadeJarvis.__new__(engines.CascadeJarvis)
+        for j in (live, cascade):
+            j.audio_in_queue = asyncio.Queue()
+        with mock.patch.object(m, "ack_audio", return_value=b"\x01" * 5000):
+            for j in (live, cascade):
+                cascade._voice = engines._Voice(lambda text, wait: None)
+                j._acknowledge("computer_settings")   # instant: no ack
+                self.assertTrue(j.audio_in_queue.empty())
+                j._acknowledge("web_search")
+                self.assertEqual(j.audio_in_queue.qsize(), 2)
+                j._acknowledge("file_controller")   # once per turn
+                self.assertEqual(j.audio_in_queue.qsize(), 2)
+            live._turn_audio = False   # new turn, and the model announced it itself
+            cascade._voice = engines._Voice(lambda text, wait: None)
+            cascade._voice.end("Lo busco ahora mismo, señor.")
+            live._spoke(mark=True)
+            for j in (live, cascade):
+                j._acknowledge("web_search")
+                self.assertEqual(j.audio_in_queue.qsize(), 2)
+
+    def test_wake_word_interrupts_even_while_awake(self):
+        import wakeword
+        results = iter([None, None, True])
+        g = wakeword.WakeGate(lambda pcm: next(results))
+        g.keep_awake()
+        self.assertEqual(g.feed(b"a"), [b"a"])   # awake: normal speech passes as it is
+        self.assertEqual(g.listen(b"x"), [])
+        self.assertEqual(g.listen(b"y"), [])
+        self.assertEqual(g.listen(b"z"), [b"x", b"y", b"z"])   # "Jarvis, para": the whole utterance
+        self.assertTrue(self.main._names_itself("Soy J.A.R.V.I.S., su asistente"))
+        self.assertFalse(self.main._names_itself("Claro, señor."))
+
+    def test_interrupt_drops_queued_audio_and_the_rest_of_the_live_reply(self):
+        import asyncio
+        m = self.main
+        j = m.JarvisLive.__new__(m.JarvisLive)
+        j._is_speaking, j._speaking_lock, j._wake, j._turn_done, j._drop_audio = True, __import__("threading").Lock(), None, False, False
+        j.ui = mock.MagicMock(muted=False)
+        j.audio_in_queue = asyncio.Queue()
+        for _ in range(3):
+            j.audio_in_queue.put_nowait(b"\x00" * 64)
+        j._interrupt_now()
+        self.assertTrue(j.audio_in_queue.empty())
+        self.assertFalse(j._is_speaking)
+        self.assertTrue(j._drop_audio)   # the server is still sending this reply
+
+    def test_interrupted_reply_goes_silent_but_its_step_still_runs(self):
+        import engines
+        said, alive = [], [True]
+        v = engines._Voice(lambda text, wait: said.append(text), lambda: alive[0])
+        v.end("Primera parte.")
+        alive[0] = False
+        v.feed("Segunda parte que ya no. ")
+        v.end("Segunda parte que ya no.")
+        self.assertEqual(said, ["Primera parte."])
+
+        brain = engines._OpenAICompat.__new__(engines._OpenAICompat)
+        brain.model, brain.tools, brain.limit, brain.system, brain.msgs, brain.sys_fn = "m", [], {}, "", [], str
+        call = mock.MagicMock(id="1", function=mock.MagicMock(arguments="{}"))
+        call.function.name = "web_search"
+        reply = mock.MagicMock(usage=None, choices=[mock.MagicMock(message=mock.MagicMock(content="", tool_calls=[call]))])
+
+        def create(**_):
+            brain.stop()   # the user interrupts while the model is answering
+            return reply
+        brain.c = mock.MagicMock()
+        brain.c.chat.completions.create.side_effect = create
+        run_tool = mock.MagicMock(return_value="STILL RUNNING")
+        self.assertEqual(brain.ask("busca algo", run_tool, said.append)[0], "")
+        run_tool.assert_called_once()   # the step the model asked for is not dropped
+        self.assertEqual(brain.c.chat.completions.create.call_count, 1)   # but no new round
+
+    def test_step_interrupted_keeps_running_and_resumes_the_task(self):
+        import asyncio, threading, engines
+        j = engines.CascadeJarvis.__new__(engines.CascadeJarvis)
+        j._epoch, j._turn_text = 0, "limpia los temporales y dime cuánto liberaste"
+        loop = asyncio.new_event_loop()
+        threading.Thread(target=loop.run_forever, daemon=True).start()
+        j._loop, release = loop, threading.Event()
+
+        async def execute(fc):
+            await asyncio.to_thread(release.wait, 5)   # a slow script
+            return mock.MagicMock(response={"result": "Freed 2 GB"})
+        j._execute_tool = execute
+        resumed = threading.Event()
+        j._handle = mock.MagicMock(side_effect=lambda **kw: resumed.set())
+        threading.Timer(0.3, lambda: setattr(j, "_epoch", 1)).start()   # the user interrupts
+        self.assertEqual(j._run_tool("solve_task", {}), engines.STILL_RUNNING)
+        self.assertFalse(resumed.is_set())   # still working
+        release.set()
+        self.assertTrue(resumed.wait(5))
+        text = j._handle.call_args.kwargs["text"]
+        self.assertIn("Freed 2 GB", text)
+        self.assertIn("limpia los temporales", text)
+        self.assertIn("cancel", text)
+        self.assertFalse(j._handle.call_args.kwargs["remember"])
+        loop.call_soon_threadsafe(loop.stop)
+
+    def test_live_tool_dropped_by_interruption_reports_back_as_a_turn(self):
+        import asyncio
+        m = self.main
+        j = m.JarvisLive.__new__(m.JarvisLive)
+        j._cancelled_calls = {"c1"}
+        j.session = mock.MagicMock(send_tool_response=mock.AsyncMock(), send_client_content=mock.AsyncMock())
+        fc = mock.MagicMock(id="c1")
+        fc.name = "solve_task"
+
+        async def execute(call):
+            fr = mock.MagicMock(id=call.id, response={"result": "done"})
+            fr.name = call.name
+            return fr
+        j._execute_tool = execute
+        asyncio.run(j._answer_tools([fc]))
+        j.session.send_tool_response.assert_not_called()
+        text = j.session.send_client_content.call_args.kwargs["turns"]["parts"][0]["text"]
+        self.assertIn("solve_task: done", text)
+        j._cancelled_calls = set()
+        asyncio.run(j._answer_tools([fc]))
+        j.session.send_tool_response.assert_called_once()
+
+    def test_mic_reopens_when_turn_ends_after_last_chunk(self):
+        import asyncio, threading
+        m = self.main
+        j = m.JarvisLive.__new__(m.JarvisLive)
+        j._is_speaking, j._speaking_lock, j._wake, j._turn_done = False, threading.Lock(), None, False
+        j.ui = mock.MagicMock(muted=False)
+
+        async def run():
+            j.audio_in_queue = asyncio.Queue()
+            task = asyncio.create_task(j._play_audio())
+            j.audio_in_queue.put_nowait(b"\0" * 64)
+            await asyncio.sleep(0.1)
+            self.assertTrue(j._is_speaking)
+            j._turn_done = True   # streamed TTS: marked done only after its last chunk played
+            await asyncio.sleep(0.6)
+            stuck = j._is_speaking
+            task.cancel()
+            return stuck
+        with mock.patch.object(m.sd, "RawOutputStream"):
+            self.assertFalse(asyncio.run(run()))
+
+    def test_boot_prompt_introduces_on_empty_memory_and_greets_on_login(self):
+        m = self.main
+        j = m.JarvisLive.__new__(m.JarvisLive)
+        with mock.patch.object(m, "load_memory", return_value={"identity": {}, "style": {"humor": "low"}}):
+            self.assertIn("first time", j._boot_prompt())
+            self.assertIsNone(j._boot_prompt())   # once per run
+        j._booted = False
+        known = {"identity": {"name": {"value": "Pablo"}}}
+        with mock.patch.object(m, "load_memory", return_value=known):
+            with mock.patch.object(m.sys, "argv", ["jarvis.pyw"]):
+                self.assertIsNone(j._boot_prompt())   # a normal start says nothing
+            j._booted = False
+            with mock.patch.object(m.sys, "argv", ["jarvis.pyw", "--autostart"]):
+                self.assertIn("computer just started", j._boot_prompt())
 
     def test_task_status_tool_declared(self):
         names = {t["name"] for t in self.main.TOOL_DECLARATIONS}
@@ -357,7 +558,50 @@ class AutostartTests(unittest.TestCase):
             app = Path(d) / "app"; app.mkdir()
             (Path(d) / "Jarvis.exe").touch()
             with mock.patch.object(autostart, "_OS", "Windows"), mock.patch.object(autostart, "BASE", app):
-                self.assertEqual(autostart.command(), [str(Path(d) / "Jarvis.exe")])
+                self.assertEqual(autostart.command(), [str(Path(d) / "Jarvis.exe"), "--autostart"])
+
+
+class SelfImproveTests(unittest.TestCase):
+    def setUp(self):
+        from agent import self_improve
+        self.si = self_improve
+        self.base = Path(tempfile.mkdtemp())
+        for rel, text in {"main.py": "x = 1\n", "core/prompt.txt": "rules\n", "memory/skills/s.py": "learned\n",
+                          "python/lib.py": "runtime\n"}.items():
+            (self.base / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.base / rel).write_text(text, encoding="utf-8")
+        for p in (mock.patch.object(self_improve, "BASE", self.base),
+                  mock.patch.object(self_improve, "SNAPS", self.base / "backups" / "code")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_code_files_leave_out_user_data_and_runtime(self):
+        self.assertEqual(self.si.code_files(), ["core/prompt.txt", "main.py"])
+
+    def test_broken_change_is_rolled_back(self):
+        def agent(_):
+            (self.base / "main.py").write_text("x = (\n", encoding="utf-8")
+            (self.base / "actions").mkdir()
+            (self.base / "actions" / "new.py").write_text("y = 2\n", encoding="utf-8")
+            return "added it"
+        with mock.patch.object(self.si, "_agent", side_effect=agent):
+            out = self.si.improve("add y")
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertEqual((self.base / "main.py").read_text(encoding="utf-8"), "x = 1\n")
+        self.assertFalse((self.base / "actions" / "new.py").exists())
+        self.assertEqual((self.base / "memory/skills/s.py").read_text(encoding="utf-8"), "learned\n")
+        self.assertIn("Nothing to undo", self.si.undo())
+
+    def test_working_change_stays_and_undo_reverts_it(self):
+        def agent(_):
+            (self.base / "main.py").write_text("x = 2\n", encoding="utf-8")
+            return "x is 2 now"
+        with mock.patch.object(self.si, "_agent", side_effect=agent):
+            out = self.si.improve("make x 2")
+        self.assertTrue(out.startswith("Done and verified (1 files: main.py)"), out)
+        self.assertEqual((self.base / "main.py").read_text(encoding="utf-8"), "x = 2\n")
+        self.si.undo()
+        self.assertEqual((self.base / "main.py").read_text(encoding="utf-8"), "x = 1\n")
 
 
 if __name__ == "__main__":

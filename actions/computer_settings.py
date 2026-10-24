@@ -195,9 +195,87 @@ def brightness_up():   return _brightness(delta=10)
 def brightness_down(): return _brightness(delta=-10)
 def brightness_set(value: int): return _brightness(absolute=max(0, min(100, int(value))))
 
-def close_app():
+def _own_pids() -> set[int]:
+    """JARVIS itself and the launcher that started it: never closed by close_app."""
+    import os
+    pids = {os.getpid()}
+    try:
+        import psutil
+        pids |= {p.pid for p in psutil.Process().parents()}
+    except Exception:
+        pass
+    return pids
+
+
+def _window_pid(hwnd) -> int:
+    import ctypes
+    pid = ctypes.c_ulong()
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
+def away_from_jarvis() -> bool:
+    """Keyboard actions go to the focused window. When that is JARVIS's own (the user just typed
+    or talked to it), focus the window behind it first. False when there is no other window."""
+    if _OS != "Windows":
+        return True
+    import ctypes
+    u = ctypes.windll.user32
+    hwnd, own = u.GetForegroundWindow(), _own_pids()
+    if _window_pid(hwnd) not in own:
+        return True
+    nxt = hwnd
+    while nxt := u.GetWindow(nxt, 2):   # GW_HWNDNEXT: next window down the z-order
+        if u.IsWindowVisible(nxt) and not u.IsIconic(nxt) and u.GetWindowTextLengthW(nxt) \
+                and _window_pid(nxt) not in own:
+            u.SetForegroundWindow(nxt)
+            time.sleep(0.15)
+            return _window_pid(u.GetForegroundWindow()) not in own
+    return False
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower().removesuffix(".exe"))
+
+
+def _matches(app: str, proc: str) -> bool:
+    a, p = _norm(app), _norm(proc)
+    return bool(a) and (p == a or (len(a) >= 3 and p.startswith(a)))
+
+
+def close_app(app: str = "") -> str:
+    """Closes the named app the way its X button does (it may ask to save), or the focused
+    window when no name is given. Never JARVIS itself: that is shutdown_jarvis."""
+    app = str(app or "").strip()
+    if app and re.sub(r"[^a-z]", "", app.lower()) == "jarvis":
+        return "Not closed: that is JARVIS itself. Use shutdown_jarvis only if the user wants JARVIS to stop."
+    if app and _OS == "Windows":
+        import psutil
+        own = _own_pids()
+        procs = [p for p in psutil.process_iter(["pid", "name"])
+                 if p.info["pid"] not in own and _matches(app, p.info["name"] or "")]
+        exact = [p for p in procs if _norm(p.info["name"]) == _norm(app)]
+        procs = exact or procs   # "chrome": chrome.exe only, not chromedriver.exe as well
+        if not procs:
+            return f"Could not close {app}: it is not running."
+        names = sorted({p.info["name"] for p in procs})
+        # No /F: a normal close request, so the app can save or ask; forcing could lose work.
+        r = subprocess.run(["taskkill", *sum((["/pid", str(p.info["pid"])] for p in procs), [])],
+                           capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        time.sleep(1.0)
+        left = [p for p in procs if p.is_running()]
+        if not left:
+            return f"Closed {', '.join(names)}."
+        return (f"Asked {', '.join(names)} to close, but {len(left)} process(es) are still running "
+                f"(it may be asking to save, or only closes when forced). {r.stderr.strip()[:200]}")
+    if app and _OS == "Darwin":
+        r = subprocess.run(["osascript", "-e", f'quit app "{app}"'], capture_output=True, text=True)
+        return f"Closed {app}." if r.returncode == 0 else f"Could not close {app}: {r.stderr.strip()[:200]}"
+    if not away_from_jarvis():
+        return "Not closed: the only window in front is JARVIS itself. Ask which app to close."
     if _OS == "Darwin": pyautogui.hotkey("command", "q")
     else:               pyautogui.hotkey("alt", "f4")
+    return "Sent close to the focused window; effect not verified."
 
 def close_window():
     if _OS == "Darwin": pyautogui.hotkey("command", "w")
@@ -635,6 +713,12 @@ _ALIASES = {
 }
 
 _DANGEROUS_ACTIONS = {"restart", "shutdown"}
+# System actions that do not go to the focused window.
+_NO_FOCUS = {"volume_up", "volume_down", "volume_set", "mute", "unmute", "brightness_up", "brightness_down",
+             "brightness_set", "sleep_display", "screen_off", "sleep", "lock_screen", "lock", "restart",
+             "shutdown", "cancel_shutdown", "play_pause", "pause_video", "next_track", "prev_track",
+             "screenshot", "open_settings", "file_explorer", "open_run", "dark_mode", "toggle_wifi",
+             "task_manager", "show_desktop", "switch_window"}
 
 
 def _detect_action(description: str) -> dict:
@@ -701,11 +785,14 @@ def computer_settings(
 
     if action in _DANGEROUS_ACTIONS:
         confirmed = str(params.get("confirmed", "")).lower()
-        if confirmed not in ("yes", "true", "1", "confirm"):
+        if confirmed not in ("yes", "true", "1", "confirm") and not params.get("_trusted"):
             return (
                 f"This will {action} the computer. "
                 f"Please confirm by calling again with confirmed=yes."
             )
+
+    if action not in _NO_FOCUS and action != "close_app" and not away_from_jarvis():
+        return f"Not done: the only window in front is JARVIS itself, so {action} would hit JARVIS."
 
     if action in ("volume_set", "brightness_set"):
         if value is None or not str(value).strip("% ").isdigit():
@@ -751,6 +838,8 @@ def computer_settings(
         return f"Unknown action: '{raw_action}'."
 
     try:
+        if action == "close_app":
+            return close_app(value or params.get("app", ""))
         # Most actions only send a key press: say that, not that it worked.
         return func() or f"Sent {action}; effect not verified."
     except Exception as e:

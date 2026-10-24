@@ -61,10 +61,13 @@ def _send_gui(app: str, receiver: str, message: str) -> str:
     if pyautogui is None:
         return f"Could not send via {app}: desktop automation (pyautogui) is unavailable."
     try:
-        if not _open_app(app):
+        from actions.open_app import focus_existing
+        if focus_existing(app):   # already open: reuse that window, no second launch
+            time.sleep(0.3)
+        elif not _open_app(app):
             return f"Could not open {app}."
-
-        time.sleep(1.5)
+        else:
+            time.sleep(1.5)
         pyautogui.hotkey(_mod(), "f")
         time.sleep(0.4)
         pyautogui.hotkey(_mod(), "a")

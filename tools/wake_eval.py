@@ -24,7 +24,7 @@ def fires(det, path: Path) -> bool:
         if (w.getframerate(), w.getnchannels(), w.getsampwidth()) != (wakeword.RATE, 1, 2):
             raise ValueError(f"{path.name}: needs 16 kHz mono 16-bit")
         while chunk := w.readframes(1024):
-            if det.feed(chunk):
+            if det.feed(chunk) not in (None, False):   # a start time, possibly 0.0
                 return True
     return det.match(json.loads(det.rec.FinalResult()).get("result", []))
 

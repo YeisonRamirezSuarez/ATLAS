@@ -141,7 +141,7 @@ D="$HOME/Library/Application Support/Jarvis"
 mkdir -p "$D"
 rsync -a --exclude ms-playwright --exclude jarvis.log "$R/app/" "$D/"
 export PLAYWRIGHT_BROWSERS_PATH="$R/app/ms-playwright"
-exec "$R/python/bin/python3" "$D/jarvis.pyw"
+exec "$R/python/bin/python3" "$D/jarvis.pyw" "$@"
 """)
     launcher.chmod(0o755)
     (app / "Info.plist").write_text(f"""<?xml version="1.0" encoding="UTF-8"?>

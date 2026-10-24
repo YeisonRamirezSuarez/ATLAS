@@ -14,7 +14,7 @@ class Launcher {
         return null;
     }
 
-    static void Main() {
+    static void Main(string[] args) {
         string dir = System.AppDomain.CurrentDomain.BaseDirectory;
         string py = Find(dir, @".venv\Scripts\python.exe", @"python\python.exe");
         string script = Find(dir, "jarvis.pyw", @"app\jarvis.pyw");
@@ -22,7 +22,7 @@ class Launcher {
             MessageBox.Show("No encuentro Python o jarvis.pyw en " + dir + "\nCrea el entorno .venv primero.", "JARVIS");
             return;
         }
-        Process.Start(new ProcessStartInfo(py, "\"" + script + "\"") {
+        Process.Start(new ProcessStartInfo(py, "\"" + script + "\" " + string.Join(" ", args)) {
             WorkingDirectory = Path.GetDirectoryName(script), UseShellExecute = false, CreateNoWindow = true
         });
     }

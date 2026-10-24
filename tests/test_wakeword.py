@@ -38,6 +38,37 @@ class WakeGateTests(unittest.TestCase):
         clock.t += 11
         self.assertFalse(gate.awake())
 
+    def test_only_audio_from_the_wake_word_on_is_passed(self):
+        chunk = b"\x00" * (wakeword.RATE // 2 * 2)   # 0.5 s of 16-bit audio
+        gate = wakeword.WakeGate(detector([None, None, None, 1.6]), clock=FakeClock())
+        out = [gate.feed(c) for c in (b"A" + chunk[1:], b"B" + chunk[1:], b"C" + chunk[1:], b"D" + chunk[1:])]
+        # "abre Chrome" (0-1 s) was said before "Jarvis" (1.6 s): only its pre-roll on goes out
+        self.assertEqual([c[:1] for c in out[-1]], [b"C", b"D"])
+
+    def test_decides_when_the_user_stops_even_if_vosk_never_hears_the_end(self):
+        finished = []
+        gate = wakeword.WakeGate(lambda pcm: None, clock=FakeClock(), finish=lambda: finished.append(1) or True)
+        for _ in range(5):
+            self.assertEqual(gate.feed(b"speech", voiced=True), [])
+        for _ in range(wakeword.END_SILENCE - 1):
+            self.assertEqual(gate.feed(b"quiet", voiced=False), [])
+        self.assertEqual(finished, [])   # a short pause is not the end
+        out = gate.feed(b"quiet", voiced=False)
+        self.assertEqual(finished, [1])
+        self.assertEqual(out[:5], [b"speech"] * 5)   # "Jarvis, abre Chrome" goes out now, not at the next wake word
+        self.assertTrue(gate.awake())
+
+    def test_window_runs_from_the_users_last_word(self):
+        clock = FakeClock()
+        gate = wakeword.WakeGate(detector([None]), window=10, clock=clock)
+        gate.keep_awake()
+        clock.t += 9
+        gate.feed(b"talking", voiced=True)   # still speaking when the window was about to close
+        clock.t += 9
+        self.assertEqual(gate.feed(b"rest of it"), [b"rest of it"])
+        clock.t += 2
+        self.assertEqual(gate.feed(b"x"), [])   # silent for the whole window: standby
+
     def test_keep_awake_extends_window(self):
         clock = FakeClock()
         gate = wakeword.WakeGate(detector([]), window=10, clock=clock)

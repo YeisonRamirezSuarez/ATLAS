@@ -141,9 +141,10 @@ def _plan_line(code: str) -> str:
     return m.group(1).strip() if m else "run a custom script"
 
 
-def solve_task(goal: str, speak: Callable | None = None, confirmed: bool = False) -> str:
+def solve_task(goal: str, speak: Callable | None = None, confirmed: bool = False, trusted: bool = False) -> str:
     """Writes and runs Python for `goal`, retrying with each error, reusing and saving learned skills.
-    Raises NeedsConfirmation before running risky code until called again with confirmed=True."""
+    Raises NeedsConfirmation before running risky code until called again with confirmed=True,
+    unless trusted: the goal falls in a case the user said needs no confirmation."""
     global _pending
     from memory.memory_manager import find_skills, save_skill
 
@@ -163,7 +164,7 @@ def solve_task(goal: str, speak: Callable | None = None, confirmed: bool = False
         plan = _plan_line(code)
         risks = _risks(code)
         # A fix of the approved script may keep its risks; asking again for every retry was a loop the user could not exit.
-        if risks and not (approved is not None and risks <= approved):
+        if risks and not trusted and not (approved is not None and risks <= approved):
             _pending = (goal, code)
             raise NeedsConfirmation(
                 f"NEEDS CONFIRMATION. The script would: {plan.rstrip('.')}. Tell the user that in one sentence "

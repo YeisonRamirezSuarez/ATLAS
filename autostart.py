@@ -16,7 +16,12 @@ _DESKTOP = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / 
 
 
 def command() -> list[str]:
-    """What the login item runs: the app's own launcher when there is one."""
+    """What the login item runs: the app's own launcher when there is one. --autostart tells
+    JARVIS the OS started it, so it greets the user (main.JarvisLive._boot_prompt)."""
+    return [*_launcher(), "--autostart"]
+
+
+def _launcher() -> list[str]:
     if _OS == "Windows":
         # Jarvis.exe next to the code (dev) or one level up (installed: {app}\Jarvis.exe, {app}\app\)
         exe = next((p for p in (BASE / "Jarvis.exe", BASE.parent / "Jarvis.exe") if p.is_file()), None)
@@ -25,7 +30,7 @@ def command() -> list[str]:
         pyw = Path(sys.executable).with_name("pythonw.exe")
         return [str(pyw if pyw.is_file() else sys.executable), str(BASE / "jarvis.pyw")]
     if _OS == "Darwin" and "/Contents/Resources/" in sys.executable:
-        return ["/usr/bin/open", sys.executable.split("/Contents/Resources/")[0]]   # the .app bundle
+        return ["/usr/bin/open", sys.executable.split("/Contents/Resources/")[0], "--args"]   # the .app bundle
     return [sys.executable, str(BASE / "jarvis.pyw")]
 
 

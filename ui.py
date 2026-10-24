@@ -1232,6 +1232,24 @@ class _DropCanvas(QWidget):
             z.mousePressEvent(e)
 
 
+def relaunch():
+    """Starts a new JARVIS; the caller exits this one. No --autostart: a reboot is not a login."""
+    subprocess.Popen([sys.executable, *(a for a in sys.orig_argv[1:] if a != "--autostart")], cwd=os.getcwd())
+
+
+def audio_devices(kind: str) -> list[str]:
+    """Names of the "input" or "output" devices on the default host API, for the settings picker
+    (Windows lists each device again under DirectSound/WASAPI). main._audio_device opens them."""
+    try:
+        import sounddevice as sd
+        api = sd.default.hostapi
+        return [d["name"] for d in sd.query_devices()
+                if d["hostapi"] == api and d[f"max_{kind}_channels"]
+                and not any(m in d["name"] for m in ("Asignador de sonido", "Sound Mapper"))]
+    except Exception:
+        return []
+
+
 class SettingsOverlay(QWidget):
     """AI engine and API keys. Shown at first boot and from the CONFIG button."""
     done      = pyqtSignal(dict)
@@ -1318,6 +1336,30 @@ class SettingsOverlay(QWidget):
         layout.addWidget(self._login)
         layout.addSpacing(6)
 
+        # Saved by name: indexes change when devices are plugged in or out.
+        self._audio = {}
+        row = QHBoxLayout()
+        for kind, label in (("input", "MICROPHONE"), ("output", "AUDIO OUTPUT")):
+            col = QVBoxLayout()
+            l = QLabel(label)
+            l.setFont(QFont(_FONT, 8))
+            l.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            cb = QComboBox()
+            cb.setFont(QFont(_FONT, 9))
+            cb.setFixedHeight(30)
+            cb.addItem("System default", "")
+            cur = cfg.get(f"{kind}_device", "")
+            names = audio_devices(kind)
+            for n in names if not cur or cur in names else [*names, cur]:
+                cb.addItem(n, n)
+            cb.setCurrentIndex(max(0, cb.findData(cur)))
+            col.addWidget(l)
+            col.addWidget(cb)
+            row.addLayout(col)
+            self._audio[kind] = cb
+        layout.addLayout(row)
+        layout.addSpacing(6)
+
         # Applied on toggle: the login entry lives in the OS, not in api_keys.json.
         self._autostart = QCheckBox("START WITH SYSTEM  ·  open JARVIS when you log in")
         self._autostart.setFont(QFont(_FONT, 8))
@@ -1398,6 +1440,8 @@ class SettingsOverlay(QWidget):
             gemini_api_key=self._gem.text().strip(),
             openrouter_api_key=self._or.text().strip(),
             base_url=self._url.text().strip(),
+            input_device=self._audio["input"].currentData(),
+            output_device=self._audio["output"].currentData(),
             os_system={"darwin": "mac", "windows": "windows"}.get(_OS.lower(), "linux"),
         )
         need = PROVIDERS[p]["key"]
@@ -1994,7 +2038,7 @@ class MainWindow(QMainWindow):
 
     def _place_overlay(self):
         cw = self.centralWidget()
-        ow, oh = 480, min(560, cw.height() - 20)
+        ow, oh = 520, min(640, cw.height() - 20)
         self._overlay.setGeometry((cw.width() - ow) // 2, (cw.height() - oh) // 2, ow, oh)
 
     def _show_setup(self, can_cancel: bool):
@@ -2017,7 +2061,8 @@ class MainWindow(QMainWindow):
             self._log.append_log("SYS: Config saved. Rebooting JARVIS...")
             # sys.executable, not orig_argv[0]: under a uv venv that is the base python, without the
             # venv's packages, so the new JARVIS died at `import numpy` and never came back.
-            subprocess.Popen([sys.executable, *sys.orig_argv[1:]], cwd=os.getcwd())
+            # Without --autostart: a settings reboot is not a login, so no boot greeting.
+            relaunch()
             QTimer.singleShot(300, lambda: os._exit(0))
             return
         self._ready = True

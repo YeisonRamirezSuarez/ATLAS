@@ -50,6 +50,10 @@ class SendGateTests(unittest.TestCase):
         self.assertEqual(smtp.send_message.call_args[0][0]["To"], "ana@example.com")
         self.assertIn("NEEDS CONFIRMATION", ec.email_client({**MAIL, "confirmed": "yes"}))   # one yes = one send
 
+    def test_trusted_case_sends_without_asking(self):
+        r = ec.email_client({**MAIL, "_trusted": True})
+        self.assertTrue(r.startswith("Sent"), r)
+
     def test_bad_address_fails(self):
         self.assertTrue(ec.email_client({**MAIL, "to": "ana"}).startswith("Could not"))
 

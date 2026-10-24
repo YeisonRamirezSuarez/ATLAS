@@ -438,6 +438,37 @@ def format_style_for_prompt(memory: dict | None) -> str:
             "warnings still win]\n" + lines + "\n")
 
 
+def set_trusted(case: str, remove: bool = False) -> str:
+    """Cases the user explicitly said need no confirmation (e.g. 'delete temp files'). Kept as a
+    plain list, like style, so the size trim never drops one and only the user adds or removes them."""
+    case = " ".join(str(case or "").split())
+    with _update_lock:
+        memory = load_memory()
+        cases  = list(memory.get("trusted") or [])
+        if case and remove:
+            cases = [c for c in cases if c.lower() != case.lower()]
+        elif case and case.lower() not in (c.lower() for c in cases):
+            cases.append(case)
+        if cases != memory.get("trusted", []):
+            memory["trusted"] = cases
+            save_memory(memory)
+    return "No confirmation needed for: " + ("; ".join(f"'{c}'" for c in cases) or "nothing (always ask).")
+
+
+def is_trusted(case: str) -> bool:
+    case = " ".join(str(case or "").split()).lower()
+    return bool(case) and case in (c.lower() for c in load_memory().get("trusted") or [])
+
+
+def format_trusted_for_prompt(memory: dict | None) -> str:
+    cases = (memory or {}).get("trusted") or []
+    if not cases:
+        return ""
+    return ("[NO CONFIRMATION — the user asked not to be asked for these cases only. When an action clearly "
+            "falls inside one, call the tool with trusted=<that case, exactly as written> instead of asking; "
+            "anything else still needs the usual yes]\n" + "\n".join(f"  - {c}" for c in cases) + "\n")
+
+
 def remember(key: str, value: str, category: str = "notes") -> str:
     valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes"}
     if category not in valid:
