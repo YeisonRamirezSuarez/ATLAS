@@ -10,6 +10,11 @@ Todo viene incluido: Python, librerías, Chromium y el modelo de la palabra de a
 
 Instrucciones completas en el [README](https://github.com/pablo29855/Jarvis-#readme).
 
+## 🩹 Correcciones en 2.3.1
+
+- 🎙️ **Vuelve la voz de JARVIS:** en 2.3.0, después de la primera respuesta usaba siempre la voz de respaldo. Ya usa de nuevo la voz de Gemini (Charon).
+- 🧬 **La auto-mejora funciona:** su verificación trataba el archivo de instrucciones `core/prompt.txt` como código Python, así que siempre fallaba y deshacía el cambio.
+
 ## ✨ Novedades en 2.3.0
 
 - ⚡ **Responde antes:** empieza a hablar en cuanto tiene la primera frase, sin esperar a terminar de escribir la respuesta.

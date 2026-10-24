@@ -78,7 +78,7 @@ def _check(tests: bool) -> tuple[bool, str]:
     run = lambda *a, t=120: subprocess.run([_python(), *a], cwd=BASE, capture_output=True, text=True,
                                            encoding="utf-8", errors="replace", timeout=t, creationflags=NO_WINDOW,
                                            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-    r = run("-m", "py_compile", *code_files())
+    r = run("-m", "py_compile", *(f for f in code_files() if f.endswith((".py", ".pyw"))))   # prompt.txt is not code
     if r.returncode == 0 and tests and (BASE / "tests").is_dir():
         r = run("-m", "unittest", "discover", "-s", "tests", t=900)
     return r.returncode == 0, (r.stdout + r.stderr)[-1500:]

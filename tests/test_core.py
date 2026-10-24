@@ -397,6 +397,13 @@ class MainToolResultTests(unittest.TestCase):
                 j._acknowledge("web_search")
                 self.assertEqual(j.audio_in_queue.qsize(), 2)
 
+    def test_gemini_voice_still_works_after_a_reply(self):
+        import engines
+        j = engines.CascadeJarvis.__new__(engines.CascadeJarvis)
+        j._voice = engines._Voice(lambda text, wait: None)   # what every reply leaves behind
+        cfg = j._speech_config()   # 2.3.0 called the _Voice instead: Jarvis fell back to edge-tts
+        self.assertEqual(cfg.voice_config.prebuilt_voice_config.voice_name, engines.VOICE_NAME)
+
     def test_wake_word_interrupts_even_while_awake(self):
         import wakeword
         results = iter([None, None, True])
@@ -566,7 +573,7 @@ class SelfImproveTests(unittest.TestCase):
         from agent import self_improve
         self.si = self_improve
         self.base = Path(tempfile.mkdtemp())
-        for rel, text in {"main.py": "x = 1\n", "core/prompt.txt": "rules\n", "memory/skills/s.py": "learned\n",
+        for rel, text in {"main.py": "x = 1\n", "core/prompt.txt": "Don't guess the user's feelings.\n", "memory/skills/s.py": "learned\n",
                           "python/lib.py": "runtime\n"}.items():
             (self.base / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.base / rel).write_text(text, encoding="utf-8")

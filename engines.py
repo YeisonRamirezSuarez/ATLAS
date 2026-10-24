@@ -471,7 +471,7 @@ class CascadeJarvis(JarvisLive):
         return self._tts_client
 
     @staticmethod
-    def _voice():
+    def _speech_config():   # not _voice: that name holds the reply being spoken (_Voice)
         from google.genai import types
         return types.SpeechConfig(voice_config=types.VoiceConfig(
             prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE_NAME)))
@@ -484,7 +484,7 @@ class CascadeJarvis(JarvisLive):
 
     async def _gemini_tts(self, text: str):
         from google.genai import types
-        cfg = types.GenerateContentConfig(response_modalities=["AUDIO"], speech_config=self._voice())
+        cfg = types.GenerateContentConfig(response_modalities=["AUDIO"], speech_config=self._speech_config())
         self._turn_done = False
         try:
             async for ch in await self._gemini().aio.models.generate_content_stream(
@@ -498,7 +498,7 @@ class CascadeJarvis(JarvisLive):
         # ponytail: one Live session per sentence (~1 s to connect); keep one open if that lag annoys.
         from google.genai import types
         cfg = types.LiveConnectConfig(response_modalities=["AUDIO"], system_instruction=READ_ALOUD,
-                                      speech_config=self._voice())
+                                      speech_config=self._speech_config())
         model = "models/" + PROVIDERS["gemini"]["model"].removeprefix("models/")
         self._turn_done = False
         try:
