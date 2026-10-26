@@ -5,10 +5,12 @@ import math
 import os
 import platform
 import random
+import re
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psutil
@@ -26,9 +28,9 @@ from PyQt6.QtGui import (
     QPen, QPixmap, QPolygonF, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QTextEdit,
-    QVBoxLayout, QWidget, QProgressBar,
+    QAbstractButton, QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QMainWindow, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
+    QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
 
 def _base_dir() -> Path:
@@ -83,6 +85,65 @@ class C:
     STEEL_D   = "#101317"
     COPPER    = "#d08a4a"
     COPPER_D  = "#4a2a14"
+    THEME     = "dark"
+    CORE      = "#fff6e4"   # reactor core light: stays bright in both themes
+    ON_PRI    = "#1a1000"   # text on a filled gold button
+    FIELD     = "#000d12"   # inputs, lists
+    OVERLAY   = "rgba(0, 6, 10, 245)"
+    HOVER     = "#001218"
+    DRAG      = "#001a24"
+    LINE      = "#1a4a5a"
+    MUTE_BG   = "#140006"
+    LIVE_BG   = "#00140a"
+    LIVE_HOV  = "#001f10"
+
+
+_DARK = {k: v for k, v in vars(C).items() if k.isupper()}
+# Same identity on paper: gold and cyan darkened so text keeps 4.5:1 contrast on white.
+# Tokens that differ in the other theme never share a value (off by one where needed): restyle() maps by value.
+_LIGHT = dict(
+    BG="#f4f1ea", PANEL="#ffffff", PANEL2="#faf7f0", BORDER="#e2d6c4", BORDER_B="#c8343f", BORDER_A="#e8d9d0",
+    PRI="#9a5c00", PRI_DIM="#c9a064", PRI_GHO="#fbefd6", ACC="#c9102e", ACC2="#8a5a00",
+    ARC="#0a7f92", ARC_D="#bfe9ef", GREEN="#0b7a53", GREEN_D="#9fdcc2", RED="#c8102e", RED_D="#f6d5d9",
+    MUTED_C="#c8102e", TEXT="#2a1f12", TEXT_DIM="#74644e", TEXT_MED="#5b4a33", WHITE="#1a1209",
+    DARK="#ebe5d9", BAR_BG="#efe6d6", GRID="#dfe9ea", STEEL="#9aa1a9", STEEL_D="#e6e8ea",
+    COPPER="#a85f22", COPPER_D="#f0dcc8", THEME="light", CORE="#fff6e5", ON_PRI="#fffefe",
+    FIELD="#fffffe", OVERLAY="rgba(251, 249, 244, 250)", HOVER="#f6f0e4", DRAG="#efe6d7", LINE="#c9a065",
+    MUTE_BG="#fbe3e6", LIVE_BG="#e3f3ec", LIVE_HOV="#d2ecdf",
+)
+THEMES = {"dark": _DARK, "light": _LIGHT}
+
+
+def apply_theme(name: str):
+    """Swaps the palette for widgets built from now on; restyle() also repaints the live ones."""
+    for k, v in THEMES.get(name, _DARK).items():
+        setattr(C, k, v)
+
+
+def restyle(name: str):
+    """Switches the theme without a restart: each old palette colour in live stylesheets, rich text
+    and the log becomes the same token's colour in the new palette; painted widgets read C anyway."""
+    old = {v.lower(): k for k, v in vars(C).items() if k.isupper() and k != "THEME"}
+    apply_theme(name)
+    swap = lambda s: re.sub(r"#[0-9a-fA-F]{6}\b|rgba\([^)]*\)",
+                            lambda m: getattr(C, old.get(m[0].lower(), ""), m[0]), s)
+    for w in QApplication.allWidgets():
+        if w.styleSheet():
+            w.setStyleSheet(swap(w.styleSheet()))
+        if isinstance(w, QLabel) and "#" in w.text():
+            w.setText(swap(w.text()))
+        elif isinstance(w, LogWidget):
+            w.setHtml(swap(w.toHtml()))
+            cur = w.textCursor()
+            cur.movePosition(cur.MoveOperation.End)
+            w.setTextCursor(cur)
+        elif isinstance(w, MetricBar):
+            w._color = swap(w._color)
+        elif isinstance(w, HudCanvas):
+            w._bg = None   # cached background layer
+        elif isinstance(w, MainWindow):
+            w._title_bar()
+        w.update()
 
 
 def qcol(h: str, a: int = 255) -> QColor:
@@ -446,7 +507,7 @@ class HudCanvas(QWidget):
             x += s * 1.5; col += 1
 
         v = QRadialGradient(W / 2, H / 2, max(W, H) * 0.72)
-        v.setColorAt(0.5, qcol("#000000", 0)); v.setColorAt(1, qcol("#000000", 210))
+        v.setColorAt(0.5, qcol(C.BG, 0)); v.setColorAt(1, qcol(C.BG, 210))
         p.fillRect(px.rect(), QBrush(v))
         p.end()
         return px
@@ -580,7 +641,7 @@ class HudCanvas(QWidget):
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawEllipse(QPointF(cx, cy), rc, rc)
         core = QRadialGradient(cx, cy, rc)
-        core.setColorAt(0.0, qcol(C.WHITE, 255))
+        core.setColorAt(0.0, qcol(C.CORE, 255))
         core.setColorAt(0.35 + 0.25 * glow, qcol(arc, 230))
         core.setColorAt(1.0, qcol(arc, 40))
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(core))
@@ -588,8 +649,8 @@ class HudCanvas(QWidget):
         tri = QPolygonF([QPointF(cx + rc * 0.78 * math.cos(math.radians(90 + 120 * n)),
                                  cy - rc * 0.78 * math.sin(math.radians(90 + 120 * n)))
                          for n in range(3)])
-        p.setBrush(QBrush(qcol(C.WHITE, int(60 + 80 * glow))))
-        p.setPen(QPen(qcol(C.WHITE, 230), max(1.5, R * 0.035)))
+        p.setBrush(QBrush(qcol(C.CORE, int(60 + 80 * glow))))
+        p.setPen(QPen(qcol(C.CORE, 230), max(1.5, R * 0.035)))
         p.drawPolygon(tri)
 
         # sparks
@@ -1142,7 +1203,7 @@ class _DropCanvas(QWidget):
         pad  = 6
         rect = QRectF(pad, pad, W - pad * 2, H - pad * 2)
 
-        bg_col = qcol("#001a24" if z._drag_over else ("#001218" if z._hovering else C.PANEL))
+        bg_col = qcol(C.DRAG if z._drag_over else (C.HOVER if z._hovering else C.PANEL))
         p.setBrush(QBrush(bg_col)); p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(rect, 6, 6)
 
@@ -1173,7 +1234,7 @@ class _DropCanvas(QWidget):
         p.drawText(QRectF(0, cy + 8, W, 16), Qt.AlignmentFlag.AlignCenter,
                    "Drop file here  or  Click to Browse")
         p.setFont(QFont(_FONT, 7))
-        p.setPen(QPen(qcol("#1a4a5a"), 1))
+        p.setPen(QPen(qcol(C.LINE), 1))
         p.drawText(QRectF(0, cy + 24, W, 14), Qt.AlignmentFlag.AlignCenter,
                    "Images · Video · Audio · PDF · Docs · Code · Data")
 
@@ -1214,7 +1275,7 @@ class _DropCanvas(QWidget):
                    f"{ext_str}  ·  {size_str}")
 
         p.setFont(QFont(_FONT, 6))
-        p.setPen(QPen(qcol("#1e5c6a"), 1))
+        p.setPen(QPen(qcol(C.LINE), 1))
         par = str(path.parent)
         if len(par) > 42: par = "…" + par[-41:]
         p.drawText(QRectF(tx, H * 0.18 + 34, tw, 12),
@@ -1250,152 +1311,443 @@ def audio_devices(kind: str) -> list[str]:
         return []
 
 
+class Toggle(QCheckBox):
+    """QCheckBox painted as a switch, or as a small box with a check (box=True) where room is tight.
+    The stock indicator showed a bare check when on and nothing at all when off."""
+
+    def __init__(self, text: str = "", box: bool = False, parent=None):
+        super().__init__(text, parent)
+        self._box = box
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def _ind(self) -> int:
+        return 15 if self._box else 38
+
+    def sizeHint(self) -> QSize:
+        fm = self.fontMetrics()
+        text = fm.horizontalAdvance(self.text()) + 8 if self.text() else 0
+        return QSize(self._ind() + text + 2, max(22, fm.height() + 4))
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def hitButton(self, pos) -> bool:   # the label is part of the button
+        return self.rect().contains(pos)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.35)
+        on, mid = self.isChecked(), self.height() / 2
+        col = qcol(C.PRI if on else C.TEXT_DIM)
+        p.setPen(QPen(col, 1.5))
+        p.setBrush(QBrush(col) if on else Qt.BrushStyle.NoBrush)
+        r = QRectF(1, mid - 6.5, 13, 13) if self._box else QRectF(1, mid - 9.25, 36, 18.5)
+        p.drawRoundedRect(r, 3 if self._box else 9.25, 3 if self._box else 9.25)
+        if self._box:
+            if on:
+                pen = QPen(qcol(C.ON_PRI), 2)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                p.setPen(pen)
+                p.drawPolyline(QPolygonF([QPointF(4.5, mid), QPointF(6.8, mid + 2.5), QPointF(11, mid - 2.5)]))
+        else:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(qcol(C.ON_PRI if on else C.TEXT_DIM))
+            p.drawEllipse(QPointF(r.right() - 9 if on else r.left() + 9, mid), 6, 6)
+        if self.hasFocus():   # keyboard users see where Space will act
+            p.setPen(QPen(qcol(C.PRI_DIM), 1, Qt.PenStyle.DotLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(r.adjusted(-2, -2, 2, 2), 5, 5)
+        if self.text():
+            p.setPen(qcol(C.TEXT))
+            p.drawText(QRectF(self._ind() + 8, 0, self.width(), self.height()),
+                       Qt.AlignmentFlag.AlignVCenter, self.text())
+
+
+class ThemeCard(QAbstractButton):
+    """Checkable card with a tiny painted main window in one palette of THEMES."""
+
+    def __init__(self, name: str, parent=None):
+        super().__init__(parent)
+        self.name = name
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(104)
+        self.setFont(QFont(_FONT, 10))
+
+    def paintEvent(self, _):
+        t, on, w = THEMES[self.name], self.isChecked(), self.width()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(qcol(C.PRI if on else (C.PRI_DIM if self.hasFocus() else C.BORDER)), 2 if on else 1))
+        p.setBrush(qcol(C.PANEL))
+        p.drawRoundedRect(QRectF(1, 1, w - 2, self.height() - 2), 7, 7)
+        pv = QRectF(9, 9, w - 18, 62)
+        p.setPen(QPen(qcol(t["BORDER"]), 1))
+        p.setBrush(qcol(t["BG"]))
+        p.drawRoundedRect(pv, 4, 4)
+        p.setPen(QPen(qcol(t["BORDER_B"]), 1))
+        p.setBrush(qcol(t["PANEL"]))
+        side = pv.width() * 0.22
+        p.drawRoundedRect(QRectF(pv.left() + 6, pv.top() + 6, side, pv.height() - 12), 2, 2)
+        p.drawRoundedRect(QRectF(pv.right() - 6 - side * 1.15, pv.top() + 6, side * 1.15, pv.height() - 12), 2, 2)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(qcol(t["ARC_D"]))
+        p.drawEllipse(pv.center(), 16, 16)
+        p.setBrush(qcol(t["ARC"]))
+        p.drawEllipse(pv.center(), 9, 9)
+        y = pv.bottom() + 16
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(qcol(C.PRI if on else C.TEXT_DIM), 4 if on else 1.5))
+        p.drawEllipse(QPointF(17, y), 5 if on else 6, 5 if on else 6)
+        p.setPen(qcol(C.TEXT))
+        p.drawText(QRectF(31, y - 10, w - 40, 20), Qt.AlignmentFlag.AlignVCenter, self.name.title())
+
+
+def _ago(iso: str) -> str:
+    """'3 min ago' from an ISO time with its zone (sync and device times are UTC)."""
+    try:
+        s = (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds()
+    except (TypeError, ValueError):
+        return "?"
+    if s >= 86400:
+        return f"{int(s // 86400)} day{'s' if s >= 172800 else ''} ago"
+    if s >= 3600:
+        return f"{int(s // 3600)} h ago"
+    return f"{int(s // 60)} min ago" if s >= 60 else "just now"
+
+
+def _text(txt: str, pt: float = 9, color: str | None = None, bold: bool = False, wrap: bool = False) -> QLabel:
+    w = QLabel(txt)
+    w.setFont(QFont(_FONT, int(pt), QFont.Weight.Bold if bold else QFont.Weight.Normal))
+    w.setStyleSheet(f"color: {color or C.TEXT};")
+    w.setWordWrap(wrap)
+    return w
+
+
+def _button(txt: str, kind: str, slot=None, h: int | None = None) -> QPushButton:
+    """kind is the stylesheet id in SettingsOverlay: outline, primary, link, danger."""
+    b = QPushButton(txt)
+    b.setObjectName(kind)
+    big = kind in ("outline", "primary")
+    b.setFont(QFont(_FONT, 10 if big else 9, QFont.Weight.Bold if big else QFont.Weight.Normal))
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    if h:
+        b.setFixedHeight(h)
+    if slot:
+        b.clicked.connect(slot)
+    return b
+
+
+def _field(text: str = "") -> QLineEdit:
+    e = QLineEdit(text)
+    e.setFont(QFont(_FONT, 10))
+    e.setFixedHeight(32)
+    return e
+
+
+def _secret_field(text: str = "") -> tuple[QLineEdit, QFrame]:
+    """Password field with a show/hide link inside the same box."""
+    box = QFrame()
+    box.setObjectName("field")
+    box.setFixedHeight(32)
+    lay = QHBoxLayout(box)
+    lay.setContentsMargins(10, 0, 8, 0)
+    e = QLineEdit(text)
+    e.setEchoMode(QLineEdit.EchoMode.Password)
+    e.setFont(QFont(_FONT, 10))
+    eye = _button("👁 show", "eye")
+    eye.setCheckable(True)
+    eye.toggled.connect(lambda on: (e.setEchoMode(QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password),
+                                    eye.setText("👁 hide" if on else "👁 show")))
+    lay.addWidget(e, 1)
+    lay.addWidget(eye)
+    return e, box
+
+
+def _section(lay, txt: str, first: bool = False):
+    if not first:
+        lay.addSpacing(12)
+    w = _text(txt, 8, C.TEXT_DIM)
+    f = w.font()
+    f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.5)
+    w.setFont(f)
+    lay.addWidget(w)
+    lay.addSpacing(2)
+
+
+def _toggle_row(toggle: Toggle, title: str, sub: str) -> QFrame:
+    """Card with a title, a dim line and the switch; a click anywhere on it flips the switch."""
+    f = QFrame()
+    f.setObjectName("card")
+    f.setCursor(Qt.CursorShape.PointingHandCursor)
+    lay = QHBoxLayout(f)
+    lay.setContentsMargins(12, 10, 12, 10)
+    lay.setSpacing(12)
+    col = QVBoxLayout()
+    col.setSpacing(2)
+    col.addWidget(_text(title, 10))
+    col.addWidget(_text(sub, 8, C.TEXT_DIM, wrap=True))
+    lay.addLayout(col, 1)
+    lay.addWidget(toggle)
+    f.mousePressEvent = lambda e: toggle.isEnabled() and toggle.toggle()
+    return f
+
+
+def _expander(lay, sub: str, body: QWidget) -> QPushButton:
+    """'▸ Advanced' line that shows or hides body, added right below it."""
+    b = QPushButton()
+    b.setObjectName("adv")
+    b.setCheckable(True)
+    b.setFont(QFont(_FONT, 9))
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    show = lambda on: (b.setText(f"{'▾' if on else '▸'}  Advanced   ·   {sub}"), body.setVisible(on))
+    b.toggled.connect(show)
+    show(False)
+    lay.addSpacing(8)
+    lay.addWidget(b)
+    lay.addWidget(body)
+    return b
+
+
 class SettingsOverlay(QWidget):
-    """AI engine and API keys. Shown at first boot and from the CONFIG button."""
+    """Settings in three tabs: GENERAL (theme, sound, startup), AI ENGINE (engine and keys) and
+    ACCOUNT (JARVIS ID and shared memory). Shown at first boot and from the CONFIG button."""
     done      = pyqtSignal(dict)
     cancelled = pyqtSignal()
+    _id_done  = pyqtSignal(str, object)   # JARVIS ID work finished in a thread: (what, result or exception)
+    # The ACCOUNT tab writes api_keys.json directly; SAVE & START keeps these from disk, not from the copy opened here.
+    _ID_KEYS  = ("supabase_url", "supabase_anon_key", "device_name", "memory_sync", "device_id")
 
     def __init__(self, cfg: dict, can_cancel: bool, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"""
             SettingsOverlay {{
-                background: rgba(0, 6, 10, 245);
-                border: 1px solid {C.BORDER_B};
-                border-radius: 6px;
+                background: {C.OVERLAY}; border: 1px solid {C.BORDER_B}; border-radius: 8px;
             }}
+            QLabel {{ background: transparent; }}
             QLineEdit, QComboBox {{
-                background: #000d12; color: {C.TEXT};
-                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 8px;
+                background: {C.FIELD}; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 5px; padding: 3px 10px;
             }}
             QLineEdit:focus, QComboBox:focus {{ border: 1px solid {C.PRI}; }}
             QComboBox QAbstractItemView {{
-                background: #000d12; color: {C.TEXT}; selection-background-color: {C.PRI_GHO};
+                background: {C.FIELD}; color: {C.TEXT};
+                selection-background-color: {C.PRI_GHO}; selection-color: {C.TEXT};
+            }}
+            QFrame#card {{ background: {C.PANEL}; border: 1px solid {C.BORDER}; border-radius: 6px; }}
+            QFrame#field {{ background: {C.FIELD}; border: 1px solid {C.BORDER}; border-radius: 5px; }}
+            QFrame#field QLineEdit {{ border: none; background: transparent; padding: 0; }}
+            QStackedWidget, QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{ background: transparent; width: 6px; }}
+            QScrollBar::handle:vertical {{ background: {C.BORDER}; border-radius: 3px; min-height: 24px; }}
+            QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{
+                height: 0; background: none;
+            }}
+            QPushButton#tab {{
+                background: transparent; color: {C.TEXT_DIM};
+                border: none; border-bottom: 2px solid transparent; padding: 6px 0 7px;
+            }}
+            QPushButton#tab:hover {{ color: {C.TEXT_MED}; }}
+            QPushButton#tab:checked {{ color: {C.PRI}; border-bottom: 2px solid {C.PRI}; }}
+            QPushButton#outline {{
+                background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 5px; padding: 0 14px;
+            }}
+            QPushButton#outline:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
+            QPushButton#primary {{
+                background: {C.PRI}; color: {C.ON_PRI};
+                border: 1px solid {C.PRI}; border-radius: 5px; padding: 0 14px;
+            }}
+            QPushButton#primary:hover {{ background: {C.ACC2}; border: 1px solid {C.ACC2}; }}
+            QPushButton#link, QPushButton#danger, QPushButton#eye {{
+                background: transparent; border: none; color: {C.PRI}; padding: 0 2px;
+            }}
+            QPushButton#danger {{ color: {C.RED}; }}
+            QPushButton#eye {{ color: {C.TEXT_DIM}; }}
+            QPushButton#link:hover, QPushButton#danger:hover, QPushButton#eye:hover {{ text-decoration: underline; }}
+            QPushButton#adv {{
+                background: transparent; color: {C.TEXT_MED}; text-align: left;
+                border: none; border-top: 1px solid {C.BORDER}; padding: 10px 2px;
             }}
         """)
         self._cfg = dict(cfg)
+        self._theme = cfg.get("theme", C.THEME)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 18, 28, 18)
-        layout.setSpacing(4)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(26, 16, 26, 16)
+        root.setSpacing(0)
+        title = _text("◈  SETTINGS", 13, C.PRI, bold=True)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(title)
+        root.addSpacing(12)
 
-        def _lbl(txt, font_size=8, bold=False, color=C.TEXT_DIM,
-                 align=Qt.AlignmentFlag.AlignLeft):
-            w = QLabel(txt)
-            w.setAlignment(align)
-            w.setFont(QFont(_FONT, font_size,
-                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
-            w.setStyleSheet(f"color: {color}; background: transparent;")
-            layout.addWidget(w)
-            return w
+        bar = QHBoxLayout()
+        bar.setSpacing(6)
+        root.addLayout(bar)
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background: {C.BORDER};")
+        root.addWidget(line)
+        pages = QStackedWidget()
+        root.addWidget(pages, 1)
+        tabs = QButtonGroup(self)
+        for i, (icon, name, build) in enumerate((("⚙", "GENERAL", self._build_general),
+                                                 ("◈", "AI ENGINE", self._build_ai),
+                                                 ("☁", "ACCOUNT", self._build_account))):
+            b = QPushButton(f"{icon}\n{name}")
+            b.setObjectName("tab")
+            b.setCheckable(True)
+            b.setFont(QFont(_FONT, 8))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            tabs.addButton(b, i)
+            bar.addWidget(b)
+            page = QWidget()
+            lay = QVBoxLayout(page)
+            lay.setContentsMargins(0, 12, 8, 4)
+            lay.setSpacing(4)
+            build(cfg, lay)
+            lay.addStretch()
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setWidget(page)
+            pages.addWidget(scroll)
+        tabs.idClicked.connect(pages.setCurrentIndex)
+        tabs.button(0).setChecked(True)
 
-        def _field(label, secret=True):
-            lbl = _lbl(label)
-            e = QLineEdit()
-            if secret:
-                e.setEchoMode(QLineEdit.EchoMode.Password)
-            e.setFont(QFont(_FONT, 10))
-            e.setFixedHeight(30)
-            layout.addWidget(e)
-            layout.addSpacing(4)
-            return lbl, e
+        self._err = _text("", 8, C.RED, wrap=True)
+        self._err.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self._err)
+        root.addSpacing(6)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        if can_cancel:
+            row.addWidget(_button("✕  CANCEL", "outline", self.cancelled.emit, 34))
+        row.addWidget(_button("▸  SAVE && START", "primary", self._submit, 34))
+        root.addLayout(row)
 
-        _lbl("◈  SYSTEM CONFIGURATION", 13, True, C.PRI, Qt.AlignmentFlag.AlignCenter)
-        _lbl("Keys stay on this computer (config/api_keys.json).", 8, color=C.PRI_DIM,
-             align=Qt.AlignmentFlag.AlignCenter)
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep)
-        layout.addSpacing(4)
+        self._shown = None
+        self._prov.currentIndexChanged.connect(self._on_provider)
+        self._prov.setCurrentIndex(max(0, self._prov.findData(cfg.get("provider", "gemini"))))
+        self._on_provider()
+        self._id_done.connect(self._id_result)
+        self._id_refresh()
+        if self._signed_in:
+            self._id_bg("devices", self._jid().devices)
 
-        _lbl("AI ENGINE")
-        self._prov = QComboBox()
-        self._prov.setFont(QFont(_FONT, 10))
-        self._prov.setFixedHeight(30)
-        for k, p in PROVIDERS.items():
-            self._prov.addItem(p["label"], k)
-        layout.addWidget(self._prov)
-        layout.addSpacing(4)
+    # ── GENERAL tab ───────────────────────────────────────────────────────────
 
-        _, self._model   = _field("MODEL", secret=False)
-        self._key_lbl, self._key = _field("ENGINE API KEY")
-        self._url_lbl, self._url = _field("BASE URL", secret=False)
-        _, self._gem = _field("GEMINI API KEY  ·  Gemini voice + vision/search tools")
-        _, self._or  = _field("OPENROUTER API KEY  ·  memory + desktop tools")
-        self._gem.setText(cfg.get("gemini_api_key", ""))
-        self._or.setText(cfg.get("openrouter_api_key", ""))
-        self._url.setText(cfg.get("base_url", ""))
-
-        self._login = QPushButton("▸  SIGN IN WITH CLAUDE (browser)")
-        self._login.setFont(QFont(_FONT, 10, QFont.Weight.Bold))
-        self._login.setFixedHeight(30)
-        self._login.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._login.setStyleSheet(f"QPushButton {{ background: transparent; color: {C.PRI};"
-                                  f" border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}"
-                                  f" QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}")
-        self._login.clicked.connect(self._sign_in)
-        layout.addWidget(self._login)
-        layout.addSpacing(6)
+    def _build_general(self, cfg, lay):
+        _section(lay, "APPEARANCE", first=True)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        lay.addLayout(row)
+        group = QButtonGroup(self)
+        for name in THEMES:
+            card = ThemeCard(name)
+            card.setChecked(name == self._theme)
+            card.clicked.connect(lambda _, n=name: self._pick_theme(n))
+            group.addButton(card)
+            row.addWidget(card)
 
         # Saved by name: indexes change when devices are plugged in or out.
+        _section(lay, "SOUND")
         self._audio = {}
         row = QHBoxLayout()
-        for kind, label in (("input", "MICROPHONE"), ("output", "AUDIO OUTPUT")):
+        row.setSpacing(10)
+        for kind, label in (("input", "Microphone"), ("output", "Speaker")):
             col = QVBoxLayout()
-            l = QLabel(label)
-            l.setFont(QFont(_FONT, 8))
-            l.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            col.setSpacing(4)
+            col.addWidget(_text(label, 9, C.TEXT_MED))
             cb = QComboBox()
             cb.setFont(QFont(_FONT, 9))
-            cb.setFixedHeight(30)
+            cb.setFixedHeight(32)
             cb.addItem("System default", "")
             cur = cfg.get(f"{kind}_device", "")
             names = audio_devices(kind)
             for n in names if not cur or cur in names else [*names, cur]:
                 cb.addItem(n, n)
             cb.setCurrentIndex(max(0, cb.findData(cur)))
-            col.addWidget(l)
             col.addWidget(cb)
-            row.addLayout(col)
+            row.addLayout(col, 1)
             self._audio[kind] = cb
-        layout.addLayout(row)
-        layout.addSpacing(6)
+        lay.addLayout(row)
 
         # Applied on toggle: the login entry lives in the OS, not in api_keys.json.
-        self._autostart = QCheckBox("START WITH SYSTEM  ·  open JARVIS when you log in")
-        self._autostart.setFont(QFont(_FONT, 8))
-        self._autostart.setStyleSheet(f"QCheckBox {{ color: {C.TEXT}; background: transparent; }}")
-        self._autostart.setCursor(Qt.CursorShape.PointingHandCursor)
+        _section(lay, "STARTUP")
+        self._autostart = Toggle()
         self._autostart.setChecked(autostart.enabled())
         self._autostart.toggled.connect(self._set_autostart)
-        layout.addWidget(self._autostart)
+        lay.addWidget(_toggle_row(self._autostart, "Start with Windows" if _OS == "Windows" else "Start at login",
+                                  "Open JARVIS when you log in."))
 
-        self._err = _lbl("", 8, color=C.RED, align=Qt.AlignmentFlag.AlignCenter)
-        layout.addStretch()
+    def _pick_theme(self, name: str):
+        # Applied and saved on click, like the startup switch: no restart.
+        self._theme = name
+        if name == C.THEME:
+            return
+        restyle(name)
+        try:
+            cfg = json.loads(API_FILE.read_text(encoding="utf-8"))
+        except Exception:   # first boot: SAVE & START writes it
+            return
+        cfg["theme"] = name
+        API_FILE.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
 
-        row = QHBoxLayout()
-        for txt, slot, show in (("✕  CANCEL", self.cancelled.emit, can_cancel),
-                                ("▸  SAVE & BOOT", self._submit, True)):
-            if not show:
-                continue
-            b = QPushButton(txt)
-            b.setFont(QFont(_FONT, 10, QFont.Weight.Bold))
-            b.setFixedHeight(34)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent; color: {C.PRI};
-                    border: 1px solid {C.PRI_DIM}; border-radius: 3px;
-                }}
-                QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
-            """)
-            b.clicked.connect(slot)
-            row.addWidget(b)
-        layout.addLayout(row)
+    # ── AI ENGINE tab ─────────────────────────────────────────────────────────
 
-        self._shown = None
-        self._prov.currentIndexChanged.connect(self._on_provider)
-        self._prov.setCurrentIndex(max(0, self._prov.findData(cfg.get("provider", "gemini"))))
-        self._on_provider()
+    def _build_ai(self, cfg, lay):
+        lay.addWidget(_text("Engine", 9, C.TEXT_MED))
+        self._prov = QComboBox()
+        self._prov.setFont(QFont(_FONT, 10))
+        self._prov.setFixedHeight(32)
+        for k, p in PROVIDERS.items():
+            self._prov.addItem(p["label"], k)
+        lay.addWidget(self._prov)
+        self._prov_help = _text("", 8, C.TEXT_DIM, wrap=True)
+        lay.addWidget(self._prov_help)
+
+        self._key_lbl = _text("", 9, C.TEXT_MED)
+        self._key, self._key_box = _secret_field()
+        lay.addSpacing(4)
+        lay.addWidget(self._key_lbl)
+        lay.addWidget(self._key_box)
+        self._login = _button("▸  SIGN IN WITH CLAUDE", "outline", self._sign_in, 34)
+        lay.addSpacing(6)
+        lay.addWidget(self._login)
+
+        _section(lay, "EXTRA KEYS")
+        lay.addWidget(_text("Gemini key", 9, C.TEXT_MED))
+        self._gem, box = _secret_field(cfg.get("gemini_api_key", ""))
+        lay.addWidget(box)
+        lay.addWidget(_text("Needed for voice, vision and web search.", 8, C.TEXT_DIM))
+        lay.addSpacing(6)
+        lay.addWidget(_text(f"OpenRouter key  <span style='color:{C.TEXT_DIM}'>· optional</span>", 9, C.TEXT_MED))
+        self._or, box = _secret_field(cfg.get("openrouter_api_key", ""))
+        lay.addWidget(box)
+        lay.addWidget(_text("Memory and desktop tools.", 8, C.TEXT_DIM))
+
+        adv = QWidget()
+        a = QVBoxLayout(adv)
+        a.setContentsMargins(0, 0, 0, 0)
+        a.setSpacing(4)
+        a.addWidget(_text("Model", 9, C.TEXT_MED))
+        self._model = _field()
+        a.addWidget(self._model)
+        self._url_lbl = _text("Server URL", 9, C.TEXT_MED)
+        self._url = _field(cfg.get("base_url", ""))
+        a.addWidget(self._url_lbl)
+        a.addWidget(self._url)
+        self._adv = _expander(lay, "model, server URL", adv)
+        note = _text("🔒  Keys stay on this PC.", 8, C.TEXT_DIM)
+        note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addSpacing(6)
+        lay.addWidget(note)
 
     def _on_provider(self):
         # Keep what was typed for the previous engine before swapping the fields.
@@ -1404,19 +1756,286 @@ class SettingsOverlay(QWidget):
         p = self._prov.currentData()
         info = PROVIDERS[p]
         own_key = info["key"] not in (None, "gemini_api_key", "openrouter_api_key")
-        self._key_lbl.setVisible(own_key); self._key.setVisible(own_key)
-        self._key_lbl.setText(f"{info['label'].upper()} API KEY")
+        self._key_lbl.setVisible(own_key); self._key_box.setVisible(own_key)
+        self._key_lbl.setText(f"{info['label']} key")
         self._key.setText(self._cfg.get(info["key"] or "", ""))
         self._url_lbl.setVisible(p == "ollama"); self._url.setVisible(p == "ollama")
         self._login.setVisible(p == "claude_sub")
+        self._prov_help.setText({"claude_sub": "Uses your Claude account. No key needed.",
+                                 "ollama": "Runs on this PC. No key needed.",
+                                 "gemini": "Uses your Gemini key below.",
+                                 "openrouter": "Uses your OpenRouter key below."}.get(p, f"Needs a {info['label']} API key."))
         self._model.setPlaceholderText(info["model"])
         self._model.setText(self._cfg.get("model", "") if p == self._cfg.get("provider", "gemini") else "")
+        if p == "ollama" or self._model.text():   # a custom model or a local server: show where it is set
+            self._adv.setChecked(True)
         self._shown = p
+
+    # ── ACCOUNT tab ───────────────────────────────────────────────────────────
+    # Network work runs in threads and comes back through _id_done; every control acts at once
+    # (no SAVE & START needed) and shows the real result, failures included.
+
+    def _build_account(self, cfg, lay):
+        self._acct_out = QWidget()
+        v = QVBoxLayout(self._acct_out)
+        v.setContentsMargins(0, 6, 0, 0)
+        v.setSpacing(12)
+        hero = QFrame()
+        hero.setObjectName("card")
+        h = QVBoxLayout(hero)
+        h.setContentsMargins(22, 26, 22, 26)
+        h.setSpacing(10)
+        ring = _text("☁", 20, C.ARC)
+        ring.setFixedSize(64, 64)
+        ring.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ring.setStyleSheet(f"color: {C.ARC}; border: 2px solid {C.ARC}; border-radius: 32px;")
+        h.addWidget(ring, 0, Qt.AlignmentFlag.AlignHCenter)
+        for w in (_text("Your memory on every device", 12, C.PRI, bold=True),
+                  _text("Sign in to keep what JARVIS knows about you in sync across your PCs.\n"
+                        "Optional: JARVIS works the same without it.", 9, C.TEXT_MED, wrap=True)):
+            w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            h.addWidget(w)
+        h.addSpacing(6)
+        self._id_login = _button("G   SIGN IN WITH GOOGLE", "primary", self._id_sign_in, 36)
+        self._id_login.setFixedWidth(260)
+        h.addWidget(self._id_login, 0, Qt.AlignmentFlag.AlignHCenter)
+        v.addWidget(hero)
+        note = _text("Passwords and keys never leave this PC.", 8, C.TEXT_DIM)
+        note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(note)
+        lay.addWidget(self._acct_out)
+
+        self._acct_in = QWidget()
+        v = QVBoxLayout(self._acct_in)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        card = QFrame()
+        card.setObjectName("card")
+        c = QHBoxLayout(card)
+        c.setContentsMargins(12, 12, 12, 12)
+        c.setSpacing(12)
+        self._avatar = _text("", 12, C.PRI, bold=True)
+        self._avatar.setFixedSize(38, 38)
+        self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._avatar.setStyleSheet(f"color: {C.PRI}; background: {C.PRI_GHO};"
+                                   f" border: 1.5px solid {C.PRI}; border-radius: 19px;")
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        self._email = _text("", 10)
+        col.addWidget(self._email)
+        col.addWidget(_text("Signed in with Google", 8, C.TEXT_DIM))
+        c.addWidget(self._avatar)
+        c.addLayout(col, 1)
+        c.addWidget(_button("Sign out", "link", lambda: self._id_bg("logout", self._jid().logout)))
+        v.addWidget(card)
+        v.addSpacing(6)
+
+        self._sync_box = Toggle()
+        self._sync_box.setChecked(bool(cfg.get("memory_sync")))
+        self._sync_box.toggled.connect(self._id_set_sync)
+        v.addWidget(_toggle_row(self._sync_box, "Sync memory across devices",
+                                "Your facts and preferences follow you. Passwords and keys never leave this PC."))
+        st = QHBoxLayout()
+        st.setContentsMargins(2, 4, 2, 0)
+        st.setSpacing(8)
+        self._dot = QLabel()
+        self._dot.setFixedSize(8, 8)
+        self._id_status = _text("", 9, C.TEXT_MED, wrap=True)
+        st.addWidget(self._dot)
+        st.addWidget(self._id_status, 1)
+        st.addWidget(_button("⟳ Sync now", "link", lambda: self._id_bg("sync", self._sync().sync_now)))
+        v.addLayout(st)
+
+        _section(v, "YOUR DEVICES")
+        self._devs = QVBoxLayout()
+        self._devs.setSpacing(6)
+        v.addLayout(self._devs)
+        self._rename = QWidget()
+        r = QHBoxLayout(self._rename)
+        r.setContentsMargins(0, 0, 0, 0)
+        self._dev_name = _field(cfg.get("device_name", ""))
+        self._dev_name.setPlaceholderText(platform.node())
+        r.addWidget(_text("Name", 9, C.TEXT_MED))
+        r.addWidget(self._dev_name, 1)
+        r.addWidget(_button("Save", "outline", self._id_save, 32))
+        self._rename.hide()
+        v.addWidget(self._rename)
+        diag = QWidget()
+        d = QHBoxLayout(diag)
+        d.setContentsMargins(0, 0, 0, 0)
+        d.addWidget(_button("Run diagnostic", "outline", self._id_diag, 30))
+        d.addStretch()
+        _expander(v, "diagnostic", diag)
+        lay.addWidget(self._acct_in)
+
+        self._id_msg = _text("", 8, C.TEXT_DIM, wrap=True)
+        lay.addSpacing(4)
+        lay.addWidget(self._id_msg)
+
+    @staticmethod
+    def _jid():
+        from memory import jarvis_id
+        return jarvis_id
+
+    @staticmethod
+    def _sync():
+        from memory import sync
+        return sync
+
+    def _id_bg(self, what: str, fn):
+        self._id_msg.setText("Working...")
+
+        def run():
+            try:
+                out = fn()
+            except Exception as e:
+                out = e
+            try:
+                self._id_done.emit(what, out)
+            except RuntimeError:   # panel closed meanwhile
+                pass
+        threading.Thread(target=run, daemon=True).start()
+
+    def _id_result(self, what: str, out):
+        if isinstance(out, Exception):
+            self._id_msg.setText(f"FAILED: {out}")
+        elif what == "devices":
+            self._fill_devices(out)
+            self._id_msg.setText("")
+        elif what == "diag":
+            self._id_msg.setText("\n".join(out))
+        elif what == "login":
+            self._id_msg.setText(f"Signed in as {out['user']['email']}; this device is linked.")
+            self._id_refresh()
+            if not self._sync_box.isChecked():   # signing in here is asking for the sync the card promises
+                self._sync_box.setChecked(True)
+            self._id_bg("devices", self._jid().devices)
+        elif what == "remove":
+            self._id_bg("devices", self._jid().devices)
+        else:
+            self._id_msg.setText(out if isinstance(out, str) else "Done.")
+            if what == "sync":
+                conflicts = self._sync().recent_conflicts(3)
+                if conflicts:
+                    self._id_msg.setText(out + "\nRecent conflicts (server copy kept):\n" + "\n".join(
+                        f"{c[0]}: yours '{c[1]}', kept '{c[2]}'" for c in conflicts))
+            if what == "logout":
+                self._fill_devices([])
+                self._id_msg.setText("Signed out; memory stays on this PC.")
+        self._id_refresh()
+
+    def _id_refresh(self):
+        try:
+            st = self._jid().status()
+            color, text = self._sync_line(st)
+        except Exception as e:
+            st, color, text = {"signed_in": False, "email": ""}, C.RED, f"JARVIS ID status FAILED ({e})"
+            self._id_msg.setText(text)
+        self._signed_in = st["signed_in"]
+        self._acct_out.setVisible(not self._signed_in)
+        self._acct_in.setVisible(self._signed_in)
+        self._email.setText(st["email"])
+        self._avatar.setText(st["email"][:1].upper() or "?")
+        self._id_status.setText(text)
+        self._dot.setStyleSheet(f"background: {color}; border-radius: 4px;")
+
+    def _sync_line(self, st: dict) -> tuple[str, str]:
+        """Dot colour and text for the line under the sync switch, from the real sync state."""
+        if not st["signed_in"]:
+            return C.TEXT_DIM, "You are not signed in; memory stays on this PC."
+        if not self._sync_box.isChecked():
+            return C.TEXT_DIM, "Sync is off; memory stays on this PC."
+        s = self._sync().stats()
+        if s["last_error"]:
+            return C.RED, f"Last sync failed: {s['last_error']}"
+        if not s["last_sync"]:
+            return C.PRI, "Not synced yet."
+        head = f"{s['pending']} changes waiting" if s["pending"] else "Up to date"
+        return C.PRI if s["pending"] else C.GREEN, f"{head}  ·  {s['synced']} memories  ·  {_ago(s['last_sync'])}"
+
+    def _fill_devices(self, devs: list[dict]):
+        while self._devs.count():
+            self._devs.takeAt(0).widget().deleteLater()
+        me = self._jid().device_id() if devs else None
+        for d in devs:
+            mine = d["id"] == me
+            row = QFrame()
+            row.setObjectName("card")
+            h = QHBoxLayout(row)
+            h.setContentsMargins(10, 8, 10, 8)
+            h.setSpacing(10)
+            h.addWidget(_text("▣" if mine else "▭", 12, C.ARC))
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            top = QHBoxLayout()
+            top.setSpacing(6)
+            name = _text(d["name"] or "?", 10)
+            name.setTextFormat(Qt.TextFormat.PlainText)   # names come from the server
+            top.addWidget(name)
+            if mine:
+                badge = _text("THIS DEVICE", 7, C.ARC)
+                badge.setStyleSheet(f"color: {C.ARC}; border: 1px solid {C.ARC}; border-radius: 8px; padding: 0 6px;")
+                top.addWidget(badge)
+            top.addStretch()
+            col.addLayout(top)
+            seen = "active now" if mine else f"seen {_ago(d['last_seen'])}"
+            col.addWidget(_text(f"v{d['app_version']}  ·  {seen}", 8, C.TEXT_DIM))
+            h.addLayout(col, 1)
+            if mine:
+                h.addWidget(_button("✎ Rename", "link", lambda: self._rename.setVisible(not self._rename.isVisible())))
+            else:
+                rm = _button("Remove", "danger")
+                rm.clicked.connect(lambda _, b=rm, i=d["id"]: self._id_remove(b, i))
+                h.addWidget(rm)
+            self._devs.addWidget(row)
+
+    def _id_save(self) -> bool:
+        from config import update_config
+        try:
+            update_config(device_name=self._dev_name.text().strip())
+        except Exception as e:   # first boot: api_keys.json exists only after SAVE & START
+            self._id_msg.setText(f"FAILED to save ({e}). Set up the AI engine first (SAVE & START).")
+            return False
+        self._id_msg.setText("Device name saved.")
+        self._rename.hide()
+        self._id_refresh()
+        if self._signed_in:   # the device list shows the name stored on the server
+            self._id_bg("devices", lambda: (self._jid().register_device(), self._jid().devices())[1])
+        return True
+
+    def _id_sign_in(self):
+        if self._id_save():
+            self._id_bg("login", self._jid().login)
+            self._id_msg.setText("Finish the Google sign-in in the browser (5 minutes)...")
+
+    def _id_set_sync(self, on: bool):
+        from config import update_config
+        try:
+            update_config(memory_sync=on)
+        except Exception as e:
+            self._id_msg.setText(f"FAILED to save ({e}).")
+            self._sync_box.blockSignals(True); self._sync_box.setChecked(not on); self._sync_box.blockSignals(False)
+            return
+        if on and self._jid().status()["signed_in"]:
+            self._id_bg("sync", self._sync().sync_now)
+        else:
+            self._id_msg.setText("Memory sync on; it starts once you sign in." if on else "Memory sync off.")
+            self._id_refresh()
+
+    def _id_diag(self):
+        from memory.memory_manager import diagnose
+        self._id_bg("diag", lambda: [*diagnose(), self._sync().describe()])
+
+    def _id_remove(self, btn: QPushButton, dev: str):
+        if btn.text() != "Confirm?":   # two clicks: there is no undo
+            btn.setText("Confirm?")
+            return
+        self._id_bg("remove", lambda: self._jid().remove_device(dev))
 
     def _sign_in(self):
         from agent.llm import subscription_login
         threading.Thread(target=subscription_login, daemon=True).start()
-        self._err.setText("Sign in with your Claude account in the browser, then SAVE & BOOT.")
+        self._err.setText("Sign in with your Claude account in the browser, then SAVE & START.")
 
     def _set_autostart(self, on: bool):
         try:
@@ -1443,11 +2062,17 @@ class SettingsOverlay(QWidget):
             input_device=self._audio["input"].currentData(),
             output_device=self._audio["output"].currentData(),
             os_system={"darwin": "mac", "windows": "windows"}.get(_OS.lower(), "linux"),
+            theme=self._theme,
         )
         need = PROVIDERS[p]["key"]
         if need and not cfg.get(need):
             self._err.setText(f"{PROVIDERS[p]['label']} needs its API key.")
             return
+        try:
+            disk = json.loads(API_FILE.read_text(encoding="utf-8"))
+            cfg.update({k: disk[k] for k in self._ID_KEYS if k in disk})
+        except Exception:   # first boot: no file yet
+            pass
         self.done.emit(cfg)
 
 
@@ -1579,12 +2204,15 @@ class MainWindow(QMainWindow):
         sc_mute.activated.connect(self._toggle_mute)
         sc_full = QShortcut(QKeySequence("F11"), self)
         sc_full.activated.connect(self._toggle_fullscreen)
+        self._title_bar()
 
+    def _title_bar(self):
         if _OS == "Windows":
-            # Dark Windows title bar with gold border (caption/border colours need Win 11).
+            # Title bar in the theme with gold border (caption/border colours need Win 11; COLORREF is BGR).
             import ctypes
             hwnd = int(self.winId())
-            for attr, val in ((20, 1), (35, 0x000D0907), (34, 0x0027B6FF)):
+            bgr = lambda h: int(h[5:7] + h[3:5] + h[1:3], 16)
+            for attr, val in ((20, int(C.THEME == "dark")), (35, bgr(C.DARK)), (34, bgr(C.PRI))):
                 v = ctypes.c_int(val)
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), 4)
 
@@ -1780,9 +2408,9 @@ class MainWindow(QMainWindow):
             ai_lay.addWidget(l)
             setattr(self, attr, l)
         # Brain picker: model (any id can be typed) + reasoning effort. APPLY saves and reboots.
-        combo_css = (f"QComboBox {{ background: #000d12; color: {C.TEXT}; border: 1px solid {C.BORDER};"
+        combo_css = (f"QComboBox {{ background: {C.FIELD}; color: {C.TEXT}; border: 1px solid {C.BORDER};"
                      f" border-radius: 3px; padding: 1px 4px; }}"
-                     f" QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT};"
+                     f" QComboBox QAbstractItemView {{ background: {C.FIELD}; color: {C.TEXT};"
                      f" selection-background-color: {C.PRI_GHO}; }}")
         self._ai_model, self._ai_effort = QComboBox(), QComboBox()
         self._ai_model.setEditable(True)
@@ -1802,9 +2430,8 @@ class MainWindow(QMainWindow):
         self._ai_apply.hide()
         ai_lay.insertWidget(ai_lay.count() - 1, self._ai_apply)
         # FAST: quick helper calls (planner check, error analyst) skip the effort. Saved live, no reboot.
-        self._ai_fast = QCheckBox("FAST helpers")
+        self._ai_fast = Toggle("FAST helpers", box=True)
         self._ai_fast.setFont(QFont(_FONT, 7))
-        self._ai_fast.setStyleSheet(f"QCheckBox {{ color: {C.TEXT}; }}")
         self._ai_fast.setToolTip("On: quick helper calls use the model's default effort.\n"
                                  "Off: they use the effort picked above too.")
         self._ai_fast.setChecked(self._load_cfg().get("fast", True))
@@ -1888,7 +2515,7 @@ class MainWindow(QMainWindow):
         self._input.setFixedHeight(30)
         self._input.setStyleSheet(f"""
             QLineEdit {{
-                background: #000d14; color: {C.WHITE};
+                background: {C.FIELD}; color: {C.WHITE};
                 border: 1px solid {C.BORDER}; border-radius: 3px; padding: 3px 7px;
             }}
             QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
@@ -1962,7 +2589,7 @@ class MainWindow(QMainWindow):
             self._mute_btn.setText("🔇  MICROPHONE MUTED")
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: #140006; color: {C.MUTED_C};
+                    background: {C.MUTE_BG}; color: {C.MUTED_C};
                     border: 1px solid {C.MUTED_C}; border-radius: 3px;
                 }}
             """)
@@ -1970,10 +2597,10 @@ class MainWindow(QMainWindow):
             self._mute_btn.setText("🎙  MICROPHONE ACTIVE")
             self._mute_btn.setStyleSheet(f"""
                 QPushButton {{
-                    background: #00140a; color: {C.GREEN};
+                    background: {C.LIVE_BG}; color: {C.GREEN};
                     border: 1px solid {C.GREEN}; border-radius: 3px;
                 }}
-                QPushButton:hover {{ background: #001f10; }}
+                QPushButton:hover {{ background: {C.LIVE_HOV}; }}
             """)
 
     def _send(self):
@@ -2053,9 +2680,12 @@ class MainWindow(QMainWindow):
         self._overlay = None
 
     def _on_setup_done(self, cfg: dict):
+        same = cfg == self._load_cfg()   # e.g. only the theme changed: it is already live and saved
         os.makedirs(CONFIG_DIR, exist_ok=True)
         API_FILE.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
         self._close_overlay()
+        if self._ready and same:
+            return
         if self._ready:
             # The engine reads its config once at boot: restart the whole app.
             self._log.append_log("SYS: Config saved. Rebooting JARVIS...")
@@ -2086,6 +2716,10 @@ class JarvisUI:
             import ctypes  # own taskbar group, so Windows shows our icon instead of python's
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Stark.Jarvis.MarkXXXIX")
         self._app.setWindowIcon(QIcon(str(BASE_DIR / "jarvis.ico")))
+        try:
+            apply_theme(json.loads(API_FILE.read_text(encoding="utf-8")).get("theme", "dark"))
+        except Exception:   # first boot: no file yet
+            pass
         self._win = MainWindow(face_path)
         self._win.show()
         self.root = _RootShim(self._app)

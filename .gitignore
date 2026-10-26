@@ -14,3 +14,8 @@ backups/
 memory/.version
 Jarvis.exe
 memory/*.corrupt-*.json
+memory/jarvis_id.session
+memory/sync.db
+config/*.tmp
+memory/*.tmp
+memory/ack-*.pcm

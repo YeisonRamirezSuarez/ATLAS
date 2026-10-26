@@ -24,7 +24,7 @@ BACKUPS  = BASE_DIR / "backups"
 STAMP    = BASE_DIR / "memory" / ".version"     # version that last ran with this data
 # User data an upgrade must keep. Code is never backed up or restored from here.
 DATA     = ["config/api_keys.json", "config/telegram.session", "config/msal_cache.bin",
-            "memory/long_term.json", "memory/skills"]
+            "memory/long_term.json", "memory/skills", "memory/sync.db", "memory/jarvis_id.session"]
 KEEP     = 10                                    # newest backups kept
 
 # version -> function(base_dir) that rewrites user data for that version. Run in order, once.

@@ -97,7 +97,7 @@ async def _agent_once(request: str) -> tuple[str, bool]:
     from claude_agent_sdk import ResultMessage, query
     from agent.llm import is_auth_error, subscription_options
     model, env = _model()
-    opts = subscription_options(SYSTEM.replace("{python}", _python()), model, cwd=str(BASE), max_turns=80,
+    opts = subscription_options(SYSTEM.replace("{python}", _python()), model, persist=True, cwd=str(BASE), max_turns=80,
                                 tools=["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
                                 allowed_tools=["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
                                 permission_mode="bypassPermissions")

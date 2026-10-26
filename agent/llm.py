@@ -75,9 +75,11 @@ def complete(prompt: str, system: str = "", fast: bool = False, max_tokens: int 
     return text
 
 
-def subscription_options(system: str, model: str, **kw):
+def subscription_options(system: str, model: str, persist: bool = False, **kw):
     """Claude Agent SDK options that bill the Claude Code login (Pro/Max), never an API key.
-    No user settings/plugins/hooks and no built-in tools unless the caller passes them."""
+    No user settings/plugins/hooks and no built-in tools unless the caller passes them.
+    persist=False: the CLI writes no session transcript to ~/.claude/projects (every helper
+    call used to leave one, so they piled up as chats). Self-improvement keeps its own."""
     import os
     from claude_agent_sdk import ClaudeAgentOptions
     env = {k: "" for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN") if os.environ.get(k)}
@@ -85,8 +87,9 @@ def subscription_options(system: str, model: str, **kw):
     token = (get_config().get("claude_oauth_token") or "").strip()
     if token:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    extra = {} if persist else {"no-session-persistence": None}
     return ClaudeAgentOptions(model=model, system_prompt=system or None, setting_sources=[],
-                              env=env, **{"tools": [], **kw})
+                              env=env, extra_args=extra, **{"tools": [], **kw})
 
 
 def claude_cli() -> str:

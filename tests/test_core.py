@@ -611,5 +611,45 @@ class SelfImproveTests(unittest.TestCase):
         self.assertEqual((self.base / "main.py").read_text(encoding="utf-8"), "x = 1\n")
 
 
+class EngramTests(unittest.TestCase):
+    """Failures are reported as failures, never as an empty result."""
+
+    def test_failed_call_is_none_with_reason_and_search_says_failed(self):
+        import subprocess
+        bad = subprocess.CompletedProcess([], 1, "", "Update available: 1 -> 2\nTo update:\nerror: database is locked\n")
+        with mock.patch.object(memory_manager, "ENGRAM_BIN", "engram"), \
+             mock.patch.object(memory_manager.subprocess, "run", return_value=bad):
+            self.assertIsNone(memory_manager._engram("context"))
+            self.assertEqual(memory_manager.ENGRAM_ERROR, "error: database is locked")
+            self.assertIn("FAILED", memory_manager.search_memory("anything"))
+            self.assertIsNone(memory_manager._engram_save("t", "c", "notes"))
+            self.assertEqual(memory_manager.recent_memories(), "")
+
+    @unittest.skipUnless(memory_manager.ENGRAM_BIN, "engram not installed")
+    def test_real_engram_save_is_confirmed_in_an_isolated_store(self):
+        import os
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"ENGRAM_DATA_DIR": d}):
+            obs = memory_manager._engram_save("isolated test", "zebra quartz 4711", "notes")
+            self.assertIsInstance(obs, int)
+            self.assertIn("zebra quartz 4711", memory_manager.search_memory("zebra quartz"))
+            self.assertIsNotNone(memory_manager._engram("delete", str(obs), "--hard", project=False))
+            self.assertIn("No memories found", memory_manager.search_memory("zebra quartz"))
+
+    @unittest.skipUnless(memory_manager.ENGRAM_BIN, "engram not installed")
+    def test_boot_diagnostic_round_trip_leaves_no_probe(self):
+        import os
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"ENGRAM_DATA_DIR": d}):
+            lines = memory_manager.diagnose()
+            self.assertTrue(any(l.startswith("Engram write/read/delete: ok") for l in lines), lines)
+            self.assertIn("No memories found", memory_manager.search_memory("jarvis boot probe"))
+
+    def test_boot_diagnostic_reports_failure(self):
+        import subprocess
+        bad = subprocess.CompletedProcess([], 1, "", "error: disk full\n")
+        with mock.patch.object(memory_manager, "ENGRAM_BIN", "engram"), \
+             mock.patch.object(memory_manager.subprocess, "run", return_value=bad):
+            self.assertIn("FAILED at write (error: disk full)", memory_manager.diagnose()[-1])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,7 @@ from config import VERSION   # noqa: E402  single version source
 SKIP_DIRS  = {".venv", ".git", ".github", ".claude", "dist", "build", "installer", "__pycache__", "backups",
               "skills"}   # memory/skills: scripts this PC's Jarvis learned
 SKIP_FILES = {"api_keys.json", "long_term.json", "jarvis.log", "Jarvis.exe", "launcher.cs",
+              "jarvis_id.session", "sync.db",                    # the developer's JARVIS ID login and sync queue
               "telegram.session", "telegram.session-journal",   # the developer's Telegram login
               "msal_cache.bin",                                  # the developer's Microsoft login
               ".version",                                        # updater stamp of this PC's data

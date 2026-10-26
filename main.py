@@ -1584,6 +1584,39 @@ def _update_watch(ui):
         time.sleep(24 * 3600)
 
 
+def _boot_diagnostic(ui):
+    """What the memory and the brain really are at boot, in the log; failures say FAILED."""
+    from agent.llm import describe
+    from memory.memory_manager import diagnose
+    from memory import sync
+    try:
+        lines = [f"AI engine: {describe()}.", *diagnose()]
+    except Exception as e:
+        lines = [f"Memory diagnostic FAILED ({e})."]
+    try:
+        lines.append(sync.describe())
+    except Exception as e:
+        lines.append(f"JARVIS ID status FAILED ({e}).")
+    for line in lines:
+        ui.write_log(f"SYS: {line}")
+
+
+def _memory_sync(ui):
+    """Shared memory every 5 minutes while signed in with sync on. Logs only what changed or failed."""
+    from memory import jarvis_id, sync
+    last = "Memory sync ok: 0 sent, 0 received."
+    while True:
+        try:
+            if sync.enabled() and jarvis_id.status()["signed_in"]:
+                msg = sync.sync_now()
+                if msg != last:
+                    ui.write_log(f"SYS: {msg}")
+                last = msg
+        except Exception as e:
+            ui.write_log(f"SYS: Memory sync FAILED ({e}).")
+        time.sleep(300)
+
+
 def main():
     ui = JarvisUI("face.png")
 
@@ -1596,6 +1629,8 @@ def main():
         except Exception as e:
             ui.write_log(f"SYS: Data migration failed ({e}); restore with: python updater.py restore <backup.zip>")
         threading.Thread(target=_update_watch, args=(ui,), daemon=True).start()
+        threading.Thread(target=_boot_diagnostic, args=(ui,), daemon=True).start()
+        threading.Thread(target=_memory_sync, args=(ui,), daemon=True).start()
         threading.Thread(target=ack_audio, daemon=True).start()   # "on it" line ready before the first tool
         try:
             import autostart

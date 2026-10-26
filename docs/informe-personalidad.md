@@ -1,5 +1,7 @@
 # Informe: personalidad e inteligencia social de JARVIS
 
+> Informe histórico de la versión 2.2.0. El estado actual está en el [README](../readme.md).
+
 Fecha: 2026-10-23. Pruebas automáticas: 112, todas correctas (`python -m unittest discover tests`).
 
 JARVIS no tiene emociones ni inteligencia emocional humana. Tiene una personalidad estable y unos "estados" funcionales que solo cambian cómo habla: el tono, la longitud, el humor y las advertencias. El modelo no se reentrenó.

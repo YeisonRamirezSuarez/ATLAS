@@ -1,5 +1,7 @@
 # Informe de progreso: autonomía de JARVIS
 
+> Informe histórico de la versión 2.1.0. El estado actual está en el [README](../readme.md).
+
 Fecha: 2026-10-23. Base: commit `c7df3e2` (versión 2.1.0). Pruebas automáticas: 110, todas correctas (`python -m unittest discover tests`).
 
 Regla de este informe: generar código no es completar una función. "Verificado" solo significa que hay una prueba que lo demuestra.

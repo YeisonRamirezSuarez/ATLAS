@@ -1,7 +1,7 @@
 import json, os, platform
 from pathlib import Path
 
-VERSION = "2.3.1"   # single source: UI, installer and Info.plist read it from here
+VERSION = "2.4.0"   # single source: UI, installer and Info.plist read it from here
 
 _CONFIG_PATH = Path(__file__).parent / "api_keys.json"
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -17,6 +17,15 @@ def protected(path) -> str | None:
 def get_config() -> dict:
     with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
+
+def update_config(**changes) -> None:
+    """Merges changes into api_keys.json (atomic). An unreadable file is never overwritten,
+    so a typo there can't wipe the keys."""
+    cfg = get_config()
+    cfg.update(changes)
+    tmp = _CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+    tmp.replace(_CONFIG_PATH)
 
 def get_os() -> str:
     """Returns: 'windows' | 'mac' | 'linux', detected from the running system."""

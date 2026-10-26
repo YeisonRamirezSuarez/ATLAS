@@ -1,4 +1,4 @@
-# 🤖 JARVIS
+# JARVIS
 
 ### Asistente personal de voz con IA para Windows, macOS y Linux
 
@@ -6,71 +6,80 @@
 [![Tests](https://img.shields.io/github/actions/workflow/status/pablo29855/Jarvis-/tests.yml?label=tests&style=for-the-badge)](https://github.com/pablo29855/Jarvis-/actions/workflows/tests.yml)
 [![Licencia](https://img.shields.io/badge/licencia-CC%20BY--NC%204.0-lightgrey?style=for-the-badge)](https://creativecommons.org/licenses/by-nc/4.0/)
 
-JARVIS escucha, ve y controla tu computador. Le hablas o le escribes, y él abre apps, busca en la web, lee tus correos, maneja archivos, escribe y ejecuta código, y hace tareas de varios pasos en segundo plano mientras te cuenta lo que está haciendo.
+JARVIS es un asistente que se maneja con la voz o con el teclado. Abre aplicaciones, busca en la web, lee tu correo, trabaja con archivos y resuelve tareas de varios pasos en segundo plano, contándote en todo momento qué está haciendo.
 
-> Basado en **[MARK XXXIX-OR](https://github.com/FatihMakes/Mark-XXXIX-OR)** de **[FatihMakes](https://www.youtube.com/@FatihMakes)**. Ver [Créditos](#-créditos).
+> Basado en **[MARK XXXIX-OR](https://github.com/FatihMakes/Mark-XXXIX-OR)** de **[FatihMakes](https://www.youtube.com/@FatihMakes)**. Ver [Créditos](#créditos).
+
+![Ventana principal de JARVIS, tema oscuro](docs/screenshots/main-dark.png)
 
 ---
 
-## 📥 Descargar
+## Descargar
 
-Instaladores listos para usar: traen Python, todas las librerías, Chromium y el modelo de la palabra de activación. No hay que instalar nada más.
+Los instaladores traen todo lo necesario: Python, las librerías, Chromium y el modelo de la palabra de activación.
 
-| Sistema | Descarga | Cómo instalar |
+| Sistema | Archivo | Instalación |
 |---|---|---|
-| 🪟 **Windows 10/11** | [**Jarvis-Setup.exe**](https://github.com/pablo29855/Jarvis-/releases/latest/download/Jarvis-Setup.exe) | Ejecútalo. No necesita permisos de administrador. |
-| 🍎 **macOS** | [**Jarvis.dmg**](https://github.com/pablo29855/Jarvis-/releases/latest/download/Jarvis.dmg) | Abre el `.dmg` y arrastra JARVIS a Aplicaciones. |
-| 🐧 **Linux** | [**Jarvis-linux.tar.gz**](https://github.com/pablo29855/Jarvis-/releases/latest/download/Jarvis-linux.tar.gz) | Descomprime y ejecuta `./install.sh`. |
+| **Windows 10/11** (64 bits) | [Jarvis-Setup.exe](https://github.com/pablo29855/Jarvis-/releases/latest/download/Jarvis-Setup.exe) | [Guía para Windows](docs/instalacion.md#windows) |
+| **macOS** (Apple Silicon) | [Jarvis.dmg](https://github.com/pablo29855/Jarvis-/releases/latest/download/Jarvis.dmg) | [Guía para macOS](docs/instalacion.md#macos) |
+| **Linux** (x64) | [Jarvis-linux.tar.gz](https://github.com/pablo29855/Jarvis-/releases/latest/download/Jarvis-linux.tar.gz) | [Guía para Linux](docs/instalacion.md#linux) |
 
-Todas las versiones: [Releases](https://github.com/pablo29855/Jarvis-/releases).
+Cada versión publica los instaladores que se lograron compilar. Si un enlace no funciona, revisa la lista de archivos en [Releases](https://github.com/pablo29855/Jarvis-/releases).
 
-> **Primera vez:** los instaladores no están firmados.
-> - **Windows:** si aparece SmartScreen, pulsa *Más información* → *Ejecutar de todas formas*.
-> - **macOS:** clic derecho sobre JARVIS → *Abrir* → *Abrir*.
-
-Al abrir JARVIS por primera vez, pulsa **CONFIG** y pon tus claves de API (ver [Motores y claves](#-motores-y-claves-de-api)).
+Los instaladores no están firmados, así que Windows y macOS muestran un aviso la primera vez. La [guía de instalación](docs/instalacion.md) explica cómo continuar, cómo actualizar y cómo resolver los problemas más comunes.
 
 ---
 
-## ✨ Qué hace
+## Qué hace
 
-| | Función | Detalle |
+- **Conversación por voz en tiempo real.** Te responde en el idioma en que le hablas. También puedes escribirle, incluso mientras está hablando.
+- **Palabra de activación sin internet.** Di "Jarvis" para despertarlo. La detección corre en tu equipo con [Vosk](https://alphacephei.com/vosk/): el audio no sale mientras está en espera.
+- **Varios motores de IA.** Gemini Live (por defecto), Claude (API o suscripción), OpenAI, OpenRouter, Groq, DeepSeek u Ollama en local.
+- **Control del equipo.** Abre aplicaciones y maneja ventanas, archivos, volumen, brillo, teclado y ratón.
+- **Tareas autónomas.** Planea y ejecuta tareas de varios pasos en segundo plano. La interfaz muestra cada tarea y el paso en que va.
+- **Habilidades aprendidas.** Si no tiene una herramienta para algo, escribe un script, lo prueba y lo guarda solo si funciona. Antes de una acción de riesgo pide confirmación.
+- **Visión y archivos.** Analiza tu pantalla, la cámara y los archivos que arrastras a la ventana (PDF, Word, Excel, código, imágenes).
+- **Correo.** Lee, busca, redacta y responde en Outlook / Microsoft 365, Gmail o IMAP. Solo envía cuando le dices que sí.
+- **Mensajes y música.** Telegram, WhatsApp, YouTube y Apple Music.
+- **Luces Bluetooth.** Controla el controlador LED SP621E (BanlanX). Solo confirma un cambio cuando el controlador responde.
+- **Memoria y personalidad.** Recuerda tus preferencias entre conversaciones y adapta el tono: pídele "más formal" o "respuestas cortas" y lo mantiene.
+- **JARVIS ID (opcional).** Inicia sesión con Google para sincronizar tu memoria entre tus equipos. Las claves de API y las contraseñas nunca se sincronizan. Ver [JARVIS ID](docs/jarvis-id-setup.md).
+- **Tema claro u oscuro.** Se cambia desde los ajustes y se aplica al momento, sin reiniciar.
+- **Sabe lo que puede hacer.** Comprueba qué herramientas funcionan en tu equipo antes de prometer algo.
+
+---
+
+## Ajustes
+
+El botón **CONFIG** (arriba a la derecha) abre los ajustes. La primera vez se abren solos. Tienen tres pestañas:
+
+| Pestaña | Qué contiene |
+|---|---|
+| **GENERAL** | Tema claro u oscuro, micrófono, altavoz e inicio automático con el sistema. |
+| **AI ENGINE** | Motor de IA, sus claves y, en *Advanced*, el modelo y la URL del servidor. |
+| **ACCOUNT** | JARVIS ID: inicio de sesión, sincronización de memoria y tus dispositivos. |
+
+El tema se aplica en cuanto lo eliges. **SAVE & START** guarda el resto de cambios; si cambiaste algo además del tema, JARVIS se reinicia para aplicarlo.
+
+| General | AI Engine | Account (tema claro) |
 |---|---|---|
-| 🎙️ | **Voz en tiempo real** | Conversación natural en cualquier idioma. Responde siempre en el idioma en que le hablas. |
-| 👂 | **Palabra de activación local** | Di "Jarvis" para despertarlo. Funciona sin internet con [Vosk](https://alphacephei.com/vosk/); el audio no sale de tu equipo mientras duerme. |
-| 🧠 | **Varios cerebros** | Gemini Live, Claude (API o suscripción), OpenAI, OpenRouter, Groq, DeepSeek u Ollama local. |
-| 🖥️ | **Control del sistema** | Abre apps, maneja archivos, volumen, brillo, ventanas, teclado y ratón. |
-| 🧩 | **Tareas autónomas** | Planea y ejecuta tareas de varios pasos en segundo plano. El HUD muestra cada tarea y en qué paso va. |
-| 🛠️ | **Aprende habilidades** | Si no tiene una herramienta, escribe un script, lo prueba y lo guarda para la próxima vez. Pide confirmación antes de cualquier acción riesgosa. |
-| 👁️ | **Visión** | Analiza tu pantalla y la cámara. |
-| 📧 | **Correo** | Lee, busca, redacta y responde (Outlook / Microsoft 365, Gmail, IMAP). Solo envía después de tu "sí". |
-| 💡 | **Luces Bluetooth** | Controla el controlador LED SP621E (BanlanX) por Bluetooth: color, encendido y apagado. Solo dice que funcionó cuando el controlador lo confirma. Protocolo de [UniLED](https://github.com/monty68/uniled) (MIT). |
-| 🔎 | **Sabe lo que puede hacer** | Revisa en vivo qué herramientas funcionan en tu equipo antes de prometer algo. Si un script falla, busca en la web y lo intenta de otra forma. |
-| 💬 | **Mensajes y música** | Telegram, WhatsApp, YouTube y Apple Music. |
-| 📂 | **Archivos** | Arrastra PDFs, código, Word, Excel o imágenes para resumirlos, analizarlos o editarlos. |
-| 💾 | **Memoria** | Recuerda tus preferencias y proyectos entre conversaciones. |
-| 🎭 | **Personalidad** | Humor seco cuando encaja y serio cuando hace falta: sin bromas en errores, urgencias o si estás molesto. Pídele "menos sarcasmo", "más formal" o "respuestas cortas" y lo recuerda. |
-| ⌨️ | **Voz o texto** | Escríbele cuando quieras, incluso mientras habla: responde al terminar. |
+| ![Pestaña GENERAL](docs/screenshots/settings-general.png) | ![Pestaña AI ENGINE](docs/screenshots/settings-ai.png) | ![Pestaña ACCOUNT](docs/screenshots/settings-account.png) |
 
----
-
-## 🧠 Motores y claves de API
-
-El botón **CONFIG** (arriba a la derecha) abre el panel de ajustes. Elige el motor, el modelo y pon sus claves; JARVIS se reinicia con ellos. El panel izquierdo muestra el modelo activo y los tokens usados.
+### Motores y claves
 
 | Motor | Qué necesitas |
 |---|---|
-| **Gemini Live** (por defecto) | Clave gratis de [Google AI Studio](https://aistudio.google.com/apikey). Voz nativa. |
-| **Claude (suscripción)** | Tu cuenta de Claude Pro/Max; inicia sesión desde ajustes. |
-| **Claude, OpenAI, Groq, DeepSeek, OpenRouter** | La clave de API de cada servicio. |
-| **Ollama** | [Ollama](https://ollama.com) corriendo en tu equipo. Sin claves. |
+| **Gemini Live** (por defecto) | Una clave gratuita de [Google AI Studio](https://aistudio.google.com/apikey). Voz nativa. |
+| **Claude (suscripción)** | Tu cuenta de Claude Pro o Max. Inicia sesión con *SIGN IN WITH CLAUDE*. |
+| **Claude, OpenAI, Groq, DeepSeek, OpenRouter** | La clave de API del servicio. |
+| **Ollama** | [Ollama](https://ollama.com) en tu equipo. Sin claves. |
 
-Los motores que no son Gemini Live usan reconocimiento de voz (OpenAI `gpt-4o-mini-transcribe` si hay `openai_api_key`, si no Google STT gratis) y voz de Gemini o Edge TTS. Algunas herramientas (visión, búsqueda web, memoria) usan las claves de Gemini y OpenRouter.
+Con un motor distinto de Gemini Live, la voz se reconoce con OpenAI `gpt-4o-mini-transcribe` (si pusiste una clave de OpenAI) o con Google STT gratuito, y se habla con la voz de Gemini o con Edge TTS. Visión, búsqueda web y memoria usan las claves de Gemini y OpenRouter.
 
 Las claves se guardan solo en tu equipo, en `config/api_keys.json`.
 
 <details>
-<summary><b>📧 Configurar correo</b></summary>
+<summary><b>Configurar correo</b></summary>
 
 Añade tus cuentas a `config/api_keys.json`:
 
@@ -81,14 +90,14 @@ Añade tus cuentas a `config/api_keys.json`:
 ]
 ```
 
-- `graph`: Microsoft 365 / Outlook.com (usa `"tenant": "consumers"` para Outlook.com personal). Registra una app de cliente público en Entra ID con permisos delegados `Mail.ReadWrite` y `Mail.Send`. La primera vez muestra un código para microsoft.com/devicelogin.
-- `imap`: Gmail, Yahoo, iCloud o cualquier servidor con `imap`/`smtp`/`smtp_port`. Gmail necesita una contraseña de aplicación.
+- `graph`: Microsoft 365 u Outlook.com (usa `"tenant": "consumers"` para cuentas personales). Registra una app de cliente público en Entra ID con los permisos delegados `Mail.ReadWrite` y `Mail.Send`. La primera vez muestra un código para microsoft.com/devicelogin.
+- `imap`: Gmail, Yahoo, iCloud o cualquier servidor con `imap`, `smtp` y `smtp_port`. Gmail necesita una contraseña de aplicación.
 
 Detalles en `actions/email_client.py`.
 </details>
 
 <details>
-<summary><b>👂 Palabra de activación</b></summary>
+<summary><b>Palabra de activación</b></summary>
 
 En `config/api_keys.json`:
 
@@ -96,18 +105,20 @@ En `config/api_keys.json`:
 "wake_word": "auto"
 ```
 
-- `auto`: activa si Vosk y el modelo están instalados (los instaladores los traen).
+- `auto`: se activa si Vosk y el modelo están instalados (los instaladores los incluyen).
 - `true`: siempre activa.
-- `false`: siempre escuchando, sin palabra de activación.
+- `false`: escucha todo el tiempo, sin palabra de activación.
 
-El botón **MICROPHONE** de la ventana silencia el micrófono; también puedes pedírselo a JARVIS.
+El botón **MICROPHONE** de la ventana silencia el micrófono. También puedes pedírselo a JARVIS.
 </details>
+
+![Ventana principal de JARVIS, tema claro](docs/screenshots/main-light.png)
 
 ---
 
-## 👩‍💻 Ejecutar desde el código
+## Ejecutar desde el código
 
-Requiere Python 3.11 y se recomienda [uv](https://docs.astral.sh/uv/).
+Necesitas Python 3.11. Se recomienda [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/pablo29855/Jarvis-.git
@@ -118,54 +129,58 @@ uv pip install -p .venv -r requirements.txt
 .venv/bin/python main.py
 ```
 
-Tests (sin red, sin micrófono, sin claves):
+En Linux instala antes `libportaudio2` y `libxcb-cursor0` (ver la [guía de Linux](docs/instalacion.md#linux)).
+
+Tests (sin red, sin micrófono y sin claves):
 
 ```bash
 python -m unittest discover tests
 ```
 
-### 📦 Construir los instaladores
+### Construir los instaladores
 
 ```bash
 .venv/bin/python installer/build.py
 ```
 
-Construye el instalador del sistema donde lo ejecutas, en `dist/`. En Windows necesita [Inno Setup 6](https://jrsoftware.org/isinfo.php).
+Construye el instalador del sistema en que se ejecuta y lo deja en `dist/`. En Windows necesita [Inno Setup 6](https://jrsoftware.org/isinfo.php). La versión se lee de `config/__init__.py`.
 
-**Publicar una versión:** sube un tag `vX.Y.Z` (por ejemplo `git tag v2.1.0 && git push origin v2.1.0`). La GitHub Action [Build installers](.github/workflows/build.yml) construye los tres instaladores y los publica en Releases. La versión se toma de `config/__init__.py`.
+**Publicar una versión:** sube un tag `vX.Y.Z` (por ejemplo `git tag v2.4.0 && git push origin v2.4.0`). La GitHub Action [Build installers](.github/workflows/build.yml) construye los tres instaladores y los publica en Releases con las notas de `.github/release-notes.md`.
 
-### 🗂️ Estructura
+### Estructura
 
 | Carpeta | Contenido |
 |---|---|
 | `main.py`, `engines.py` | Bucle de voz, motores y herramientas |
-| `ui.py` | Interfaz y HUD |
+| `ui.py` | Interfaz, HUD y ajustes |
 | `agent/` | Planificador, ejecutor y cola de tareas en segundo plano |
 | `actions/` | Herramientas: apps, archivos, web, correo, mensajes, música… |
-| `memory/` | Memoria y habilidades aprendidas (`builtin_skills/` viene incluido) |
+| `memory/` | Memoria, JARVIS ID, sincronización y habilidades aprendidas (`builtin_skills/` viene incluido) |
+| `supabase/` | Migraciones de la base de datos de JARVIS ID |
 | `wakeword.py` | Palabra de activación local |
+| `updater.py` | Copias de seguridad y aviso de versiones nuevas |
 | `installer/` | Construcción de instaladores |
+| `docs/` | Guías e informes |
 | `tests/` | Tests |
 
 ---
 
-## 📋 Requisitos
+## Requisitos
 
 | | |
 |---|---|
-| **Sistema** | Windows 10/11, macOS o Linux (x64) |
-| **Micrófono** | Para hablarle (por texto funciona sin él) |
-| **Claves** | Al menos una: Gemini (gratis) o el motor que elijas |
-| **Espacio** | ~2 GB instalado |
-| **Bluetooth** | Opcional, para luces LED (Bluetooth LE) |
+| **Sistema** | Windows 10/11 de 64 bits, macOS en Apple Silicon o Linux x64 |
+| **Micrófono** | Para hablarle. Por texto funciona sin él. |
+| **Claves** | Al menos una: Gemini (gratuita) o la del motor que elijas |
+| **Espacio** | Unos 2 GB instalado |
+| **Internet** | Necesario para los motores en la nube. Ollama funciona en local. |
+| **Bluetooth** | Opcional, para las luces LED (Bluetooth LE) |
 
 ---
 
-## 🙏 Créditos
+## Créditos
 
-Este proyecto parte de **[MARK XXXIX-OR](https://github.com/FatihMakes/Mark-XXXIX-OR)**, creado por **FatihMakes**: la base de JARVIS, su interfaz, el bucle de voz con Gemini Live y las herramientas originales son su trabajo. El historial de commits original se conserva en este repositorio.
-
-Sigue al creador original:
+Este proyecto parte de **[MARK XXXIX-OR](https://github.com/FatihMakes/Mark-XXXIX-OR)**, creado por **FatihMakes**. La base de JARVIS, su interfaz, el bucle de voz con Gemini Live y las herramientas originales son su trabajo. El historial de commits original se conserva en este repositorio.
 
 | Plataforma | Enlace |
 |---|---|
@@ -173,10 +188,12 @@ Sigue al creador original:
 | Instagram | [@fatihmakes](https://www.instagram.com/fatihmakes) |
 | Video de la versión original | [Ver en YouTube](https://youtu.be/ldvDNzwnM8k) |
 
-Mejoras de esta versión por **[Pablo Romero](https://github.com/pablo29855)**: cerebros Claude y multi-motor, palabra de activación local, HUD de tareas en segundo plano, habilidades aprendidas, correo, instaladores para cada sistema y actualizador.
+Mejoras de esta versión por **[Pablo Romero](https://github.com/pablo29855)**: motores Claude y multimotor, palabra de activación local, tareas en segundo plano, habilidades aprendidas, correo, JARVIS ID, ajustes con tema claro y oscuro, instaladores para cada sistema y actualizador.
+
+El protocolo de las luces SP621E proviene de [UniLED](https://github.com/monty68/uniled) (MIT).
 
 ---
 
-## ⚠️ Licencia
+## Licencia
 
 Uso personal y no comercial. Igual que el proyecto original, se distribuye bajo **[Creative Commons BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)**: puedes compartirlo y modificarlo dando crédito, pero no usarlo con fines comerciales.
