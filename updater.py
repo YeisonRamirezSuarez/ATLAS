@@ -1,18 +1,21 @@
 """
-Version upgrades and update checks. JARVIS never installs releases (it rewrites its own code only on the user's
+Version upgrades and update checks. ATLAS never installs releases (it rewrites its own code only on the user's
 request, agent/self_improve.py): when the
 version changes it backs up the user's data first, and it only *tells* the user about a newer
 release. Installing one stays the user's decision (run the new installer).
 
-  python updater.py check            newer release on GitHub? (needs "update_repo": "owner/name")
+  python updater.py check            newer ATLAS release on GitHub? newer versions of its tools?
   python updater.py backup           zip keys + memory into backups/
   python updater.py restore <zip>    put a backup back (rollback after a bad upgrade)
 
 api_keys.json (optional):
-  "update_repo":  "owner/name"   # GitHub repo whose releases are checked; unset = no checks
+  "update_repo":  "owner/name"   # GitHub repo whose releases are checked (default REPO); "" = no checks
 """
+import importlib.metadata
 import json
 import re
+import shutil
+import subprocess
 import sys
 import urllib.request
 import zipfile
@@ -24,8 +27,13 @@ BACKUPS  = BASE_DIR / "backups"
 STAMP    = BASE_DIR / "memory" / ".version"     # version that last ran with this data
 # User data an upgrade must keep. Code is never backed up or restored from here.
 DATA     = ["config/api_keys.json", "config/telegram.session", "config/msal_cache.bin",
-            "memory/long_term.json", "memory/skills", "memory/sync.db", "memory/jarvis_id.session"]
+            "memory/long_term.json", "memory/skills", "memory/sync.db", "memory/atlas_id.session",
+            "memory/jarvis_id.session"]   # name before 2.5.0, still in old backups
 KEEP     = 10                                    # newest backups kept
+REPO     = "YeisonRamirezSuarez/ATLAS"           # ATLAS's own releases, not upstream JARVIS's
+# Packages that talk to online services: a new upstream version often fixes a broken tool.
+PACKAGES = ["google-genai", "anthropic", "claude-agent-sdk", "openai", "playwright", "edge-tts", "ddgs",
+            "youtube-transcript-api"]
 
 # version -> function(base_dir) that rewrites user data for that version. Run in order, once.
 MIGRATIONS: dict[str, callable] = {}
@@ -58,7 +66,7 @@ def restore(zip_path: Path, base: Path = BASE_DIR) -> list[str]:
         names = z.namelist()
         bad = [n for n in names if ".." in Path(n).parts or not any(n == d or n.startswith(d + "/") for d in DATA)]
         if bad:
-            raise ValueError(f"Not a JARVIS data backup (unexpected paths: {bad[:3]})")
+            raise ValueError(f"Not an ATLAS data backup (unexpected paths: {bad[:3]})")
         backup(base, "before-restore")   # a restore can itself be undone
         z.extractall(base)
     return names
@@ -72,29 +80,63 @@ def on_start(version: str, base: Path = BASE_DIR, log=print) -> None:
         return
     if last:   # first run ever has nothing to migrate
         saved = backup(base, f"before-{version}")
-        log(f"SYS: Updated {last} -> {version}. Data backup: {saved or 'nothing to back up'}.")
+        log(f"SIS: Actualizado {last} -> {version}. Respaldo de datos: {saved or 'nada que respaldar'}.")
         for v in sorted((v for v in MIGRATIONS if parse(last) < parse(v) <= parse(version)), key=parse):
             MIGRATIONS[v](base)   # an exception stops here: the stamp stays old, so it retries next start
     stamp.parent.mkdir(exist_ok=True)
     stamp.write_text(version, encoding="utf-8")
 
 
+def _get_json(url: str, timeout: float) -> dict:
+    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "ATLAS"})
+    return json.load(urllib.request.urlopen(req, timeout=timeout))
+
+
+def _nums(v: str) -> tuple[int, ...]:
+    return tuple(map(int, re.findall(r"\d+", str(v).split("+")[0])))
+
+
 def check(version: str, repo: str | None, timeout: float = 10) -> str:
     """One-line answer about the latest GitHub release. Never downloads or installs anything."""
     if not repo:
-        return "Update check off: set \"update_repo\": \"owner/name\" in api_keys.json."
-    req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/latest",
-                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "JARVIS"})
+        return "Búsqueda de actualizaciones apagada: pon \"update_repo\": \"owner/name\" en api_keys.json."
     try:
-        rel = json.load(urllib.request.urlopen(req, timeout=timeout))
+        rel = _get_json(f"https://api.github.com/repos/{repo}/releases/latest", timeout)
     except Exception as e:
-        return f"Could not check for updates ({repo}): {e}"
+        return f"No se pudo buscar actualizaciones ({repo}): {e}"
     latest = parse(rel.get("tag_name", ""))
     if not latest:
-        return f"Could not check for updates: release tag {rel.get('tag_name')!r} is not a version."
+        return f"No se pudo buscar actualizaciones: la etiqueta {rel.get('tag_name')!r} no es una versión."
     if latest > parse(version):
-        return f"Update available: {rel['tag_name']} (you have {version}). Download: {rel.get('html_url')}"
-    return f"JARVIS {version} is up to date."
+        return f"Actualización disponible: {rel['tag_name']} (tienes {version}). Descarga: {rel.get('html_url')}"
+    return f"ATLAS {version} está al día."
+
+
+def check_tools(timeout: float = 10) -> list[str]:
+    """"name installed -> latest" for each tool with a newer release (PyPI, engram on GitHub).
+    A tool that is missing or can't be looked up is skipped: this never blocks the start."""
+    def latest(pkg):
+        return _get_json(f"https://pypi.org/pypi/{pkg}/json", timeout)["info"]["version"]
+
+    found = []
+    for pkg in PACKAGES:
+        try:
+            have, new = importlib.metadata.version(pkg), latest(pkg)
+        except Exception:
+            continue
+        if _nums(new) > _nums(have):
+            found.append(f"{pkg} {have} -> {new}")
+    engram = shutil.which("engram", path=str(BASE_DIR / "bin")) or shutil.which("engram")
+    try:
+        have = subprocess.run([engram, "version"], capture_output=True, text=True, timeout=timeout,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.split()[-1]
+        new = _get_json("https://api.github.com/repos/Gentleman-Programming/engram/releases/latest",
+                        timeout)["tag_name"].lstrip("v")
+        if _nums(new) > _nums(have):
+            found.append(f"engram {have} -> {new}")
+    except Exception:
+        pass
+    return found
 
 
 if __name__ == "__main__":
@@ -104,10 +146,11 @@ if __name__ == "__main__":
     if cmd == "check":
         try:
             from config import get_config
-            repo = get_config().get("update_repo")
+            repo = get_config().get("update_repo", REPO)
         except Exception:
-            repo = None
+            repo = REPO
         print(check(VERSION, repo))
+        print(*(check_tools() or ["Herramientas al día."]), sep="\n")
     elif cmd == "backup":
         print(backup() or "No user data to back up.")
     elif cmd == "restore" and len(sys.argv) > 2:

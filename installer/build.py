@@ -1,11 +1,11 @@
-"""Build a self-contained JARVIS installer for the OS this runs on.
+"""Build a self-contained ATLAS installer for the OS this runs on.
 
     python installer/build.py
 
 Run it with a relocatable interpreter (uv / python-build-standalone, Python 3.11),
 ideally from the project's venv so its packages are reused instead of downloaded.
-Output in dist/: Jarvis-Setup.exe (Windows, needs Inno Setup), Jarvis.dmg (macOS),
-Jarvis-linux.tar.gz (Linux).
+Output in dist/: Atlas-Setup.exe (Windows, needs Inno Setup), Atlas.dmg (macOS),
+Atlas-linux.tar.gz (Linux).
 """
 import os
 import platform
@@ -17,16 +17,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
-OUT  = DIST / "Jarvis"
+OUT  = DIST / "Atlas"
 OS   = platform.system()          # Windows | Darwin | Linux
-ENGRAM_VERSION = "3.5.2"
+ENGRAM_VERSION = "3.6.0"
 VOSK_MODEL     = "vosk-model-small-es-0.42"   # wake word; must match wakeword.DEFAULT_MODEL
 sys.path.insert(0, str(ROOT))
 from config import VERSION   # noqa: E402  single version source
-SKIP_DIRS  = {".venv", ".git", ".github", ".claude", "dist", "build", "installer", "__pycache__", "backups",
-              "skills"}   # memory/skills: scripts this PC's Jarvis learned
-SKIP_FILES = {"api_keys.json", "long_term.json", "jarvis.log", "Jarvis.exe", "launcher.cs",
-              "jarvis_id.session", "sync.db",                    # the developer's JARVIS ID login and sync queue
+SKIP_DIRS  = {".venv", ".git", ".github", ".claude", ".superpowers", "dist", "build", "installer", "__pycache__", "backups",
+              "skills"}   # memory/skills: scripts this PC's Atlas learned
+SKIP_FILES = {"api_keys.json", "long_term.json", "atlas.log", "Atlas.exe", "launcher.cs",
+              "jarvis.log", "Jarvis.exe", "jarvis_id.session",   # same, from before 2.5.0
+              "atlas_id.session", "sync.db",                    # the developer's ATLAS ID login and sync queue
               "telegram.session", "telegram.session-journal",   # the developer's Telegram login
               "msal_cache.bin",                                  # the developer's Microsoft login
               ".version",                                        # updater stamp of this PC's data
@@ -55,8 +56,10 @@ def bundle():
 
     # 3. App source, without the developer's keys, memory or logs.
     app = OUT / "app"
+    # .bak_* are self-improve backups (one is a copy of api_keys.json); Atlas.spec a PyInstaller leftover.
     shutil.copytree(ROOT, app, ignore=lambda d, names: [
-        n for n in names if n in SKIP_DIRS or n in SKIP_FILES or n.endswith(".pyc")])
+        n for n in names if n in SKIP_DIRS or n in SKIP_FILES or n.endswith(".pyc") or ".bak_" in n
+        or n.startswith(("api_keys", "long_term", "sync.db")) or n in ("Atlas.spec", "atlas-hud.png")])
 
     # 4. Chromium for browser_control (the headless shell is never used).
     env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(app / "ms-playwright")}
@@ -64,7 +67,8 @@ def bundle():
 
     # 5. engram CLI (long-term memory): bin/ was copied with the app; otherwise download it.
     # ffmpeg is left out: 440 MB for one optional tool (audio extraction), which says when it is missing.
-    if not any((app / "bin").glob("engram*")):
+    exe = "engram.exe" if OS == "Windows" else "engram"   # a bin/ copied from another OS has the wrong one
+    if not (app / "bin" / exe).is_file():
         fetch_engram(app / "bin")
 
     # 6. Vosk Spanish model for the local wake word (~40 MB); models/ was copied if present.
@@ -110,89 +114,93 @@ def fetch_engram(dst):
 
 def icon_png(dst):
     from PIL import Image   # in requirements.txt
-    Image.open(ROOT / "jarvis.ico").save(dst)   # largest frame, 256 px
+    Image.open(ROOT / "atlas.ico").save(dst)   # largest frame, 256 px
     return dst
 
 
 def windows():
-    # Same launcher as the dev Jarvis.exe: hidden console, so tools don't flash windows.
+    # Same launcher as the dev Atlas.exe: hidden console, so tools don't flash windows.
     csc = Path(os.environ["WINDIR"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
-    run(csc, "-nologo", "-target:winexe", f"-win32icon:{ROOT / 'jarvis.ico'}", "-r:System.Windows.Forms.dll",
-        f"-out:{OUT / 'Jarvis.exe'}", ROOT / "launcher.cs")
+    run(csc, "-nologo", "-target:winexe", f"-win32icon:{ROOT / 'atlas.ico'}", "-r:System.Windows.Forms.dll",
+        f"-out:{OUT / 'Atlas.exe'}", ROOT / "launcher.cs")
     iscc = shutil.which("iscc") or next((p for p in (
         Path(os.environ.get("ProgramFiles(x86)", "")) / "Inno Setup 6/ISCC.exe",
         Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/Inno Setup 6/ISCC.exe",
     ) if p.is_file()), None)
     if not iscc:
-        sys.exit(f"Bundle ready in {OUT}. Install Inno Setup 6 to build Jarvis-Setup.exe.")
-    run(iscc, f"/DAppVer={VERSION}", ROOT / "installer" / "jarvis.iss")
+        sys.exit(f"Bundle ready in {OUT}. Install Inno Setup 6 to build Atlas-Setup.exe.")
+    run(iscc, f"/DAppVer={VERSION}", ROOT / "installer" / "atlas.iss")
 
 
 def mac():
-    app = DIST / "Jarvis.app" / "Contents"
+    app = DIST / "Atlas.app" / "Contents"
     shutil.rmtree(app.parent, ignore_errors=True)
     (app / "MacOS").mkdir(parents=True)
     shutil.move(OUT, app / "Resources")
-    launcher = app / "MacOS" / "Jarvis"
+    launcher = app / "MacOS" / "Atlas"
     # The bundle stays read-only: code runs from Application Support, where it may
     # write its keys, memory and log. Chromium is used in place.
     launcher.write_text("""#!/bin/sh
 R="$(cd "$(dirname "$0")/../Resources" && pwd)"
-D="$HOME/Library/Application Support/Jarvis"
+D="$HOME/Library/Application Support/Atlas"
+O="$HOME/Library/Application Support/Jarvis"   # before 2.5.0
+[ -d "$O" ] && [ ! -d "$D" ] && mv "$O" "$D"
 mkdir -p "$D"
-rsync -a --exclude ms-playwright --exclude jarvis.log "$R/app/" "$D/"
+rsync -a --exclude ms-playwright --exclude atlas.log "$R/app/" "$D/"
 export PLAYWRIGHT_BROWSERS_PATH="$R/app/ms-playwright"
-exec "$R/python/bin/python3" "$D/jarvis.pyw" "$@"
+exec "$R/python/bin/python3" "$D/atlas.pyw" "$@"
 """)
     launcher.chmod(0o755)
     (app / "Info.plist").write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleName</key><string>JARVIS</string>
-<key>CFBundleIdentifier</key><string>com.markxxxix.jarvis</string>
-<key>CFBundleExecutable</key><string>Jarvis</string>
-<key>CFBundleIconFile</key><string>jarvis.icns</string>
+<key>CFBundleName</key><string>ATLAS</string>
+<key>CFBundleIdentifier</key><string>com.atlas.assistant</string>
+<key>CFBundleExecutable</key><string>Atlas</string>
+<key>CFBundleIconFile</key><string>atlas.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>{VERSION}</string>
-<key>NSMicrophoneUsageDescription</key><string>JARVIS listens to your voice commands.</string>
-<key>NSAppleEventsUsageDescription</key><string>JARVIS controls apps on request.</string>
-<key>NSBluetoothAlwaysUsageDescription</key><string>JARVIS controls Bluetooth lights on request.</string>
+<key>NSMicrophoneUsageDescription</key><string>ATLAS listens to your voice commands.</string>
+<key>NSAppleEventsUsageDescription</key><string>ATLAS controls apps on request.</string>
+<key>NSBluetoothAlwaysUsageDescription</key><string>ATLAS controls Bluetooth lights on request.</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 """)
-    iconset = DIST / "jarvis.iconset"
+    iconset = DIST / "atlas.iconset"
     iconset.mkdir(exist_ok=True)
-    png = icon_png(DIST / "jarvis.png")
+    png = icon_png(DIST / "atlas.png")
     for s in (16, 32, 128, 256):
         run("sips", "-z", s, s, png, "--out", iconset / f"icon_{s}x{s}.png")
-    run("iconutil", "-c", "icns", iconset, "-o", app / "Resources" / "jarvis.icns")
+    run("iconutil", "-c", "icns", iconset, "-o", app / "Resources" / "atlas.icns")
     shutil.rmtree(iconset)
-    dmg = DIST / "Jarvis.dmg"
+    dmg = DIST / "Atlas.dmg"
     dmg.unlink(missing_ok=True)
-    run("hdiutil", "create", "-volname", "JARVIS", "-srcfolder", app.parent, "-ov", "-format", "UDZO", dmg)
+    run("hdiutil", "create", "-volname", "ATLAS", "-srcfolder", app.parent, "-ov", "-format", "UDZO", dmg)
 
 
 def linux():
-    icon_png(OUT / "app" / "jarvis.png")
+    icon_png(OUT / "app" / "atlas.png")
     (OUT / "install.sh").write_text("""#!/bin/sh
-# Installs JARVIS for the current user (no root needed).
+# Installs ATLAS for the current user (no root needed).
 set -e
-D="$HOME/.local/share/jarvis"
+D="$HOME/.local/share/atlas"
+O="$HOME/.local/share/jarvis"   # before 2.5.0
+[ -d "$O" ] && [ ! -d "$D" ] && mv "$O" "$D" && rm -f "$HOME/.local/share/applications/jarvis.desktop"
 mkdir -p "$D" "$HOME/.local/share/applications"
 cp -a "$(dirname "$0")/python" "$(dirname "$0")/app" "$D/"   # upgrades keep keys and memory
-cat > "$HOME/.local/share/applications/jarvis.desktop" <<EOF
+cat > "$HOME/.local/share/applications/atlas.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=JARVIS
-Exec="$D/python/bin/python3" "$D/app/jarvis.pyw"
-Icon=$D/app/jarvis.png
+Name=ATLAS
+Exec="$D/python/bin/python3" "$D/app/atlas.pyw"
+Icon=$D/app/atlas.png
 Terminal=false
 Categories=Utility;
 EOF
-echo "Installed. Open JARVIS from your app menu."
+echo "Installed. Open ATLAS from your app menu."
 """)
     (OUT / "install.sh").chmod(0o755)
-    run("tar", "-czf", DIST / "Jarvis-linux.tar.gz", "-C", DIST, "Jarvis")
+    run("tar", "-czf", DIST / "Atlas-linux.tar.gz", "-C", DIST, "Atlas")
 
 
 if __name__ == "__main__":

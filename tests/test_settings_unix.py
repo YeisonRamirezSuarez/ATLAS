@@ -110,28 +110,28 @@ class CloseAppTests(unittest.TestCase):
         return p
 
     @unittest.skipUnless(__import__("importlib.util").util.find_spec("psutil"), "psutil not installed")
-    def test_closing_an_app_never_closes_jarvis(self):
-        self.assertIn("JARVIS itself", cs.close_app("Jarvis"))
+    def test_closing_an_app_never_closes_atlas(self):
+        self.assertIn("ATLAS itself", cs.close_app("Atlas"))
         procs = [self.proc(1, "pythonw.exe"), self.proc(2, "Spotify.exe"), self.proc(3, "Spotify.exe")]
         with mock.patch.object(cs, "_OS", "Windows"), mock.patch.object(cs, "_own_pids", return_value={1}), \
              mock.patch("psutil.process_iter", return_value=procs), \
              mock.patch.object(cs.subprocess, "run") as run, mock.patch.object(cs.time, "sleep"), \
              mock.patch.object(cs.subprocess, "CREATE_NO_WINDOW", 0, create=True):
             self.assertEqual(cs.close_app("spotify"), "Closed Spotify.exe.")
-            self.assertEqual(run.call_args[0][0], ["taskkill", "/pid", "2", "/pid", "3"])   # no /F, not JARVIS
-            self.assertIn("not running", cs.close_app("python"))   # JARVIS's own process is off limits
+            self.assertEqual(run.call_args[0][0], ["taskkill", "/pid", "2", "/pid", "3"])   # no /F, not ATLAS
+            self.assertIn("not running", cs.close_app("python"))   # ATLAS's own process is off limits
 
     def test_exact_name_wins_and_short_names_do_not_match_everything(self):
         self.assertTrue(cs._matches("whatsapp", "WhatsApp.Root.exe"))
         self.assertFalse(cs._matches("co", "Code.exe"))
         self.assertTrue(cs._matches("Visual Studio Code", "VisualStudioCode.exe"))
 
-    def test_keyboard_action_does_not_hit_jarvis_when_it_is_the_only_window(self):
-        with mock.patch.object(cs, "away_from_jarvis", return_value=False), \
+    def test_keyboard_action_does_not_hit_atlas_when_it_is_the_only_window(self):
+        with mock.patch.object(cs, "away_from_atlas", return_value=False), \
              mock.patch.object(cs, "minimize_window") as mini:
-            self.assertIn("JARVIS itself", cs.computer_settings({"action": "minimize"}))
+            self.assertIn("ATLAS itself", cs.computer_settings({"action": "minimize"}))
             mini.assert_not_called()
-            self.assertIn("JARVIS itself", cs.computer_settings({"action": "close_app"}))
+            self.assertIn("ATLAS itself", cs.computer_settings({"action": "close_app"}))
 
 
 if __name__ == "__main__":

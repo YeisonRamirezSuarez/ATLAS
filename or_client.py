@@ -89,8 +89,8 @@ class OpenRouterClient:
         return {
             "Authorization": f"Bearer {_load_api_key()}",
             "Content-Type":  "application/json",
-            "HTTP-Referer":  "https://github.com/jarvis",
-            "X-Title":       "JARVIS",
+            "HTTP-Referer":  "https://github.com/atlas",
+            "X-Title":       "ATLAS",
         }
 
     def _is_rate_limited(self, model: str) -> bool:
@@ -293,7 +293,7 @@ client = OpenRouterClient()
 
 if __name__ == "__main__":
     print("=" * 55)
-    print("  JARVIS — OpenRouter Client Self-Test")
+    print("  ATLAS — OpenRouter Client Self-Test")
     print("=" * 55)
 
     print("\n[TEST 1] Basic chat...")

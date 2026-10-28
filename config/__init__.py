@@ -1,17 +1,25 @@
 import json, os, platform
 from pathlib import Path
 
-VERSION = "2.4.0"   # single source: UI, installer and Info.plist read it from here
+VERSION = "2.5.1"   # single source: UI, installer and Info.plist read it from here
 
 _CONFIG_PATH = Path(__file__).parent / "api_keys.json"
+
+# Started from inside a Claude Code session (a terminal, an editor, an agent rebuilding ATLAS), the
+# subscription engine would inherit that session: its config dir (another login, whose refresh token
+# both then rotate until one is signed out) and CLAUDECODE, which makes the nested CLI exit with 1.
+# ATLAS always uses its own login in ~/.claude.
+for _k in [k for k in os.environ if k == "CLAUDECODE" or k == "CLAUDE_CONFIG_DIR" or k.startswith("CLAUDE_CODE_")]:
+    if _k != "CLAUDE_CODE_OAUTH_TOKEN":
+        del os.environ[_k]
 APP_DIR = Path(__file__).resolve().parent.parent
 
 def protected(path) -> str | None:
-    """Refusal text when a chat tool would change JARVIS's own folder (code, keys, memory).
-    JARVIS changes itself only through the installer/updater, which the user runs."""
+    """Refusal text when a chat tool would change ATLAS's own folder (code, keys, memory).
+    ATLAS changes itself only through the installer/updater, which the user runs."""
     p = Path(path).expanduser().resolve()
     if p == APP_DIR or APP_DIR in p.parents:
-        return f"Refused: {p} is inside JARVIS's own folder; my code and data can't be changed from chat."
+        return f"Refused: {p} is inside ATLAS's own folder; my code and data can't be changed from chat."
     return None
 
 def get_config() -> dict:
@@ -56,8 +64,8 @@ PROVIDERS = {
     "openai":     {"label": "OpenAI",         "model": "gpt-5-mini",               "key": "openai_api_key",     "url": None,
                    "models": ["gpt-5", "gpt-5-mini", "gpt-5-nano"],
                    "efforts": ["minimal", "low", "medium", "high"], "effort": "medium"},
-    "openrouter": {"label": "OpenRouter",     "model": "google/gemini-2.5-flash",  "key": "openrouter_api_key", "url": "https://openrouter.ai/api/v1",
-                   "models": ["google/gemini-2.5-flash", "anthropic/claude-sonnet-5-5", "openai/gpt-5-mini"]},
+    "openrouter": {"label": "OpenRouter",     "model": "google/gemini-3.8-flash",  "key": "openrouter_api_key", "url": "https://openrouter.ai/api/v1",
+                   "models": ["google/gemini-3.8-flash", "anthropic/claude-sonnet-5-5", "openai/gpt-5-mini"]},
     "groq":       {"label": "Groq",           "model": "llama-3.3-70b-versatile",  "key": "groq_api_key",       "url": "https://api.groq.com/openai/v1",
                    "models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]},
     "deepseek":   {"label": "DeepSeek",       "model": "deepseek-chat",            "key": "deepseek_api_key",   "url": "https://api.deepseek.com",

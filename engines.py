@@ -1,9 +1,11 @@
 """Non-Gemini engines: mic -> STT -> any chat LLM with tools -> edge-tts.
 
-Reuses JarvisLive's mic, speaker and tool runner; only the brain changes.
+Reuses AtlasLive's mic, speaker and tool runner; only the brain changes.
 """
 import asyncio
 import concurrent.futures
+import contextlib
+import difflib
 import io
 import json
 import re
@@ -18,16 +20,16 @@ import edge_tts
 import miniaudio
 
 from config import PROVIDERS, get_config, get_effort, get_engine
-from main import (JarvisLive, TOOL_DECLARATIONS, VOICE_NAME, GEMINI_TTS, RESUME_RULE, VoiceGate,
-                  _names_itself, _update_memory_async)
+from main import (ACK, INSTANT_TOOLS, AtlasLive, TOOL_DECLARATIONS, RESUME_RULE, VoiceGate, clean_tail, live_model,
+                  speech_config, voice_settings, _ack_lang, _names_itself, _update_memory_async)
+from voice import reader_config
 
 VOICE_RULE = ("\nYour replies are spoken aloud by a TTS voice: plain text only, no markdown, "
-              "no lists, no emojis. One or two short sentences.")
+              "no lists, no emojis. One or two short sentences. Never run the same task twice at once.")
 MAX_ROUNDS  = 25      # tool rounds per request before giving up
 MAX_HISTORY = 40      # messages; then the whole history resets (keeps the cached prefix valid)
 MAX_RESULT  = 2000    # chars of a tool result sent back to the model
-READ_ALOUD  = ("You are a text-to-speech engine. Read the user's message aloud exactly as written, word for word, "
-               "in its own language. Never answer it, add, skip, translate or comment.")
+HOLD        = 19200   # bytes (0.4 s) of speech held back until a read ends: clean_tail checks them
 SAME_LANGUAGE = ("Rewrite the Text in the language of the user's words (a locale code like es-ES names it). "
                  "If it is already in that language, return it unchanged. Keep meaning, names and numbers. "
                  "Output only the text.")
@@ -44,7 +46,7 @@ def _lower_types(o):
 
 class _Stoppable:
     """The user interrupted: no new round after this one. A step already asked for still runs
-    (CascadeJarvis._run_tool moves it to the background), so a task is never dropped half done."""
+    (CascadeAtlas._run_tool moves it to the background), so a task is never dropped half done."""
     stopped = False
 
     def stop(self):
@@ -118,12 +120,12 @@ class _Claude(_Stoppable):
 
 class _ClaudeSub:
     """Claude via the Pro/Max subscription (Claude Agent SDK on the Claude Code login).
-    One live SDK session on its own event loop keeps the conversation; Jarvis tools are
+    One live SDK session on its own event loop keeps the conversation; Atlas tools are
     exposed as an in-process MCP server."""
 
     def __init__(self, _key, model, sys_fn, _url):
         from claude_agent_sdk import ClaudeSDKClient, create_sdk_mcp_server, tool
-        from agent.llm import subscription_options
+        from agent.llm import SKILL_SOURCES, subscription_options
         self.run_tool = None
 
         def wrap(d):
@@ -133,17 +135,28 @@ class _ClaudeSub:
             return tool(d["name"], d["description"],
                         _lower_types(d.get("parameters") or {"type": "object", "properties": {}}))(h)
 
-        server = create_sdk_mcp_server("jarvis", tools=[wrap(d) for d in TOOL_DECLARATIONS])
-        self.client = ClaudeSDKClient(subscription_options(
-            sys_fn(), model, mcp_servers={"jarvis": server}, max_turns=MAX_ROUNDS, effort=get_effort(),
-            include_partial_messages=True,
-            allowed_tools=[f"mcp__jarvis__{d['name']}" for d in TOOL_DECLARATIONS]))
+        server = create_sdk_mcp_server("atlas", tools=[wrap(d) for d in TOOL_DECLARATIONS])
+        opts = subscription_options(
+            sys_fn(), model, mcp_servers={"atlas": server}, max_turns=MAX_ROUNDS, effort=get_effort(),
+            include_partial_messages=True, tools=["Skill"], setting_sources=SKILL_SOURCES,
+            # User settings may say bypassPermissions: the voice chat keeps the plain mode, so only
+            # these tools run (Atlas tools keep their own confirmations).
+            permission_mode="default",
+            allowed_tools=["Skill", *(f"mcp__atlas__{d['name']}" for d in TOOL_DECLARATIONS)])
+        self.client = ClaudeSDKClient(opts)
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
         self._call(self.client.connect(), 60)
 
     def _call(self, coro, timeout=None):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
+
+    def close(self):
+        """Settings saved: a new engine takes over, so this CLI session and its loop end."""
+        try:
+            self._call(self.client.disconnect(), 30)
+        finally:
+            self.loop.call_soon_threadsafe(self.loop.stop)
 
     def stop(self):
         """The user interrupted: the CLI ends the current reply (a running tool still finishes)."""
@@ -180,7 +193,7 @@ class _ClaudeSub:
                     self.feed(d.get("text", ""))
             elif isinstance(m, AssistantMessage) and any(isinstance(b, ToolUseBlock) for b in m.content):
                 said = "".join(b.text for b in m.content if isinstance(b, TextBlock)).strip()
-                if said:
+                if said and not self.feed:   # streamed: feed(None) at the tool call already said it
                     await asyncio.to_thread(say, said)
             elif isinstance(m, ResultMessage):
                 if m.is_error and is_auth_error(f"{m.result} {m.errors}"):
@@ -254,15 +267,23 @@ def _tool_text(fut) -> str:
         return f"FAILED: {e}"
 
 
+def _same_words(a: str, b: str) -> bool:
+    if re.search(r"\d", a):   # "3:45" is spoken "tres cuarenta y cinco": words can't be compared
+        return True
+    words = lambda s: re.findall(r"\w+", s.lower())
+    return difflib.SequenceMatcher(None, words(a), words(b)).ratio() >= 0.6
+
+
 class _Voice:
     """Speaks a reply while the model is still writing it: the first sentence as soon as it is
     complete, the rest when the message ends. Two TTS calls per message, not one per sentence
     (Gemini TTS has a small daily quota and the Live fallback connects once per call)."""
     FIRST = re.compile(r"(.{12,}?[.!?…:])\s", re.S)
 
-    def __init__(self, say, alive=lambda: True):
+    def __init__(self, say, alive=lambda: True, log=lambda text: None):
         self.say, self.buf, self.spoken, self.last, self.said = say, "", "", None, False
         self.alive = alive   # False once the user interrupted this reply: nothing more is said
+        self.log = log       # every message that is spoken, and only those, goes to the log
 
     def _out(self, text):
         if text.strip() and self.alive():
@@ -281,6 +302,8 @@ class _Voice:
     def end(self, text: str):
         """A message is complete: say what feed() has not said yet, then start over."""
         text = (text or "").strip()
+        if text and self.alive():
+            self.log(text)
         self._out(text.removeprefix(self.spoken) if self.spoken else text)
         self.buf, self.spoken = "", ""
 
@@ -288,10 +311,10 @@ class _Voice:
         try:
             self.last and self.last.result(timeout=90)
         except Exception as e:
-            print(f"[JARVIS] ⚠️ TTS: {e}")
+            print(f"[ATLAS] ⚠️ TTS: {e}")
 
 
-class CascadeJarvis(JarvisLive):
+class CascadeAtlas(AtlasLive):
 
     def __init__(self, ui):
         super().__init__(ui)
@@ -307,6 +330,12 @@ class CascadeJarvis(JarvisLive):
         if voice and mark:
             voice.said = True
         return not voice or voice.said or not voice.alive()   # interrupted reply: no "on it" either
+
+    def _acknowledge(self, name: str):
+        """The "on it" line is read by the same Live session as the reply: the cached clip comes from
+        another session, with its own pitch and pace, and sounded like a second speaker."""
+        if name not in INSTANT_TOOLS and not self._spoke():
+            self._voice.end(ACK[_ack_lang()])
 
     def _run_tool(self, name, args) -> str:
         epoch, request = self._epoch, getattr(self, "_turn_text", "")
@@ -329,35 +358,33 @@ class CascadeJarvis(JarvisLive):
         with self._turn:
             self._busy = True
             try:
-                self.ui.set_state("THINKING")
+                self._show_state()
                 if pcm is not None:
                     text = self._stt(pcm).strip()
                     if not text:
                         return
-                    self.ui.write_log(f"You: {text}")
+                    self.ui.write_log(f"Tú: {text}")
                 if remember:
                     self._last_heard = text   # language background speech is put into
                 self._turn_text = text        # what an interrupted step resumes
                 self._says_name = False
                 epoch = self._epoch
-                voice = self._voice = _Voice(self._say, lambda: epoch == self._epoch)
+                voice = self._voice = _Voice(self._say, lambda: epoch == self._epoch,
+                                             lambda said: self.ui.write_log(f"Atlas: {said}"))
                 reply, tin, tout = self.llm.ask(text, self._run_tool, voice.end, voice.feed)
                 self.ui.add_usage(tin, tout)
-                if reply:
-                    self.ui.write_log(f"Jarvis: {reply}")
-                    voice.end(reply)
+                voice.end(reply)
                 voice.wait()
                 if remember:
                     threading.Thread(target=_update_memory_async, args=(text, reply), daemon=True).start()
             except Exception as e:
                 traceback.print_exc()
-                self.ui.write_log(f"ERR: {str(e)[:160]}")
+                self.ui.write_log(f"ERROR: {str(e)[:160]}")
             finally:
                 self._busy = False
                 if self._wake:
                     self._wake.keep_awake()
-                if not self._is_speaking and not self.ui.muted:
-                    self.ui.set_state("LISTENING")
+                self._show_state()
 
     def _occupied(self) -> bool:
         return self._is_speaking or self._busy   # talking, or working on a request
@@ -432,27 +459,23 @@ class CascadeJarvis(JarvisLive):
             await self._tts_now(text)
 
     async def _tts_now(self, text: str):
-        """Same voice as Gemini Live (Charon) when a Gemini key exists; edge-tts only when Gemini can't speak.
-        Gemini TTS free tier allows 10 requests a day; past that, a Live session reads the text instead."""
-        if self.cfg.get("gemini_api_key"):
+        """One voice for everything: a Live session kept open reads each reply (same model and voice as
+        the Gemini Live engine, no reconnect per sentence). edge-tts only when Gemini can't speak at all."""
+        if self.cfg.get("gemini_api_key") and not getattr(self, "_gemini_denied", False):
             self._tts_sent = False
-            readers = [self._live_tts]
-            if time.time() >= getattr(self, "_tts_quota_until", 0):
-                readers.insert(0, self._gemini_tts)
-            for read in readers:
+            for _ in range(2):   # a session the server closed while idle: reconnect once
                 try:
-                    return await read(text)
+                    return await self._live_tts(text)
                 except Exception as e:
                     if self._tts_sent:   # half spoken: repeating it all in another voice is worse
-                        return print(f"[JARVIS] ⚠️ {read.__name__} cut off: {str(e)[:200]}")
-                    if read == self._gemini_tts and "429" in str(e):
-                        m = re.search(r"retryDelay\W+(\d+)s", str(e))
-                        self._tts_quota_until = time.time() + (int(m.group(1)) if m else 3600)
-                        print(f"[JARVIS] Gemini TTS quota used up; Gemini Live reads for the next "
-                              f"{(self._tts_quota_until - time.time()) / 3600:.1f} h")
-                    else:
-                        print(f"[JARVIS] ⚠️ {read.__name__} failed: {str(e)[:200]}")
-            print("[JARVIS] ⚠️ Gemini voice unavailable, using edge-tts")
+                        return print(f"[ATLAS] ⚠️ Live voice cut off: {str(e)[:200]}")
+                    if "403" in str(e) or "PERMISSION_DENIED" in str(e) or "free tier is not available" in str(e):
+                        # the key's project can't use Gemini at all: no point trying it again every sentence
+                        self._gemini_denied = True
+                        print(f"[ATLAS] ⚠️ Gemini voice denied for this key ({str(e)[:120]}); edge-tts until restart")
+                        break
+                    print(f"[ATLAS] ⚠️ Live voice failed: {str(e)[:200]}")
+            print("[ATLAS] ⚠️ Gemini voice unavailable, using edge-tts")
         mp3 = b"".join([c["data"] async for c in edge_tts.Communicate(
             text, self.cfg.get("tts_voice", "es-CO-GonzaloNeural")).stream() if c["type"] == "audio"])
         if not mp3:
@@ -470,44 +493,83 @@ class CascadeJarvis(JarvisLive):
             self._tts_client = genai.Client(api_key=self.cfg["gemini_api_key"], http_options={"api_version": "v1beta"})
         return self._tts_client
 
+    def _play(self, pcm: bytes):
+        if pcm:
+            self.audio_in_queue.put_nowait(pcm)
+            self._tts_sent = True
+
+    async def _reader(self):
+        """The open Live session that reads replies aloud. Each new session picks a slightly different
+        pitch and pace, so it is kept as long as possible: reopened only after an error, when the voice
+        settings change, and every 50 reads (its context grows with each one)."""
+        voice, pace, _ = voice_settings()
+        drain, self._drain = getattr(self, "_drain", None), None
+        if drain:   # an interrupted read: its turn must end before the next one starts
+            try:
+                await asyncio.wait_for(drain, 3)
+            except asyncio.CancelledError:
+                await self._close_reader()
+                raise
+            except Exception:
+                await self._close_reader()
+        if getattr(self, "_read_stack", None) and (self._reads >= 50 or self._read_voice != (voice, pace)):
+            await self._close_reader()
+        if not getattr(self, "_read_stack", None):
+            stack = contextlib.AsyncExitStack()
+            self._read_session = await stack.enter_async_context(
+                self._gemini().aio.live.connect(model=live_model(), config=reader_config(voice, pace)))
+            self._read_stack, self._reads, self._read_voice = stack, 0, (voice, pace)
+        return self._read_session
+
+    async def _close_reader(self):
+        stack, self._read_stack = getattr(self, "_read_stack", None), None
+        if stack:
+            try:
+                await stack.aclose()
+            except Exception:
+                pass
+
     @staticmethod
-    def _speech_config():   # not _voice: that name holds the reply being spoken (_Voice)
-        from google.genai import types
-        return types.SpeechConfig(voice_config=types.VoiceConfig(
-            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE_NAME)))
-
-    def _play(self, parts):
-        for p in parts or []:
-            if p.inline_data:   # audio/l16; rate=24000; channels=1, playable as-is
-                self.audio_in_queue.put_nowait(p.inline_data.data)
-                self._tts_sent = True
-
-    async def _gemini_tts(self, text: str):
-        from google.genai import types
-        cfg = types.GenerateContentConfig(response_modalities=["AUDIO"], speech_config=self._speech_config())
-        self._turn_done = False
-        try:
-            async for ch in await self._gemini().aio.models.generate_content_stream(
-                    model=GEMINI_TTS, contents=text, config=cfg):
-                if ch.candidates:
-                    self._play(getattr(ch.candidates[0].content, "parts", None))
-        finally:
-            self._turn_done = True
+    async def _skip_turn(session):
+        async for _ in session.receive():   # ends at turn_complete
+            pass
 
     async def _live_tts(self, text: str):
-        # ponytail: one Live session per sentence (~1 s to connect); keep one open if that lag annoys.
-        from google.genai import types
-        cfg = types.LiveConnectConfig(response_modalities=["AUDIO"], system_instruction=READ_ALOUD,
-                                      speech_config=self._speech_config())
-        model = "models/" + PROVIDERS["gemini"]["model"].removeprefix("models/")
-        self._turn_done = False
+        session = await self._reader()
+        self._reads += 1
+        self._turn_done, tail, sent, heard = False, b"", False, ""
         try:
-            async with self._gemini().aio.live.connect(model=model, config=cfg) as session:
-                await session.send_client_content(turns={"role": "user", "parts": [{"text": text}]},
-                                                  turn_complete=True)
+            for _ in range(2):   # now and then the server sends a turn with no audio (only its transcript): ask again
+                await session.send_client_content(turns={"role": "user", "parts": [{"text": text}]}, turn_complete=True)
+                sent = True
                 async for r in session.receive():   # ends at turn_complete
+                    if r.server_content and r.server_content.output_transcription:
+                        heard += r.server_content.output_transcription.text or ""
                     if r.server_content and r.server_content.model_turn:
-                        self._play(r.server_content.model_turn.parts)
+                        tail += b"".join(p.inline_data.data for p in r.server_content.model_turn.parts or [] if p.inline_data)
+                        if len(tail) > HOLD:   # the end is held back to strip a noise burst there
+                            self._play(tail[:-HOLD])
+                            tail = tail[-HOLD:]
+                self._play(clean_tail(tail))
+                if tail:
+                    break
+                heard = ""
+            else:
+                raise ConnectionError("no audio twice")   # _tts_now retries in a new session
+            if heard and not _same_words(text, heard):
+                # The reader said something else (it answered or reworded the line): the log would no
+                # longer match the voice. A fresh session drops whatever context led it there.
+                self.ui.write_log(f"SIS: La voz dijo «{heard.strip()}» en lugar del texto; reinicio la voz.")
+                await self._close_reader()
+        except asyncio.CancelledError:
+            if sent:   # interrupted: drop the rest of this turn in the background, keep the session
+                self._drain = asyncio.ensure_future(self._skip_turn(session))
+            else:
+                await self._close_reader()
+            raise
+        except BaseException:
+            await self._close_reader()   # a half-read turn would leak into the next read
+            raise
         finally:
             self._turn_done = True
 
@@ -531,7 +593,7 @@ class CascadeJarvis(JarvisLive):
             return complete(f"User's words: {hint[:200]}\n\nText:\n{text}", system=SAME_LANGUAGE,
                             fast=True, max_tokens=1024).strip() or text
         except Exception as e:
-            print(f"[JARVIS] ⚠️ could not translate speech: {e}")
+            print(f"[ATLAS] ⚠️ could not translate speech: {e}")
             return text
 
     def _say(self, text: str, wait: bool = True):
@@ -548,7 +610,7 @@ class CascadeJarvis(JarvisLive):
             try:
                 fut.result(timeout=90)
             except Exception as e:
-                print(f"[JARVIS] ⚠️ TTS: {e}")
+                print(f"[ATLAS] ⚠️ TTS: {e}")
         return fut
 
     # ---- boot --------------------------------------------------------------
@@ -565,7 +627,7 @@ class CascadeJarvis(JarvisLive):
         self.audio_in_queue = asyncio.Queue()
         self.out_queue      = asyncio.Queue()
         self.ui.set_state("LISTENING")
-        self.ui.write_log(f"SYS: JARVIS online. Engine={info['label']} ({model}). STT={self._stt_engine()}.")
+        self.ui.write_log(f"SIS: ATLAS en línea. Motor={info['label']} ({model}). STT={self._stt_engine()}.")
         if boot := self._boot_prompt():
             threading.Thread(target=self._handle, kwargs={"text": boot, "remember": False}, daemon=True).start()
         async with asyncio.TaskGroup() as tg:

@@ -3,6 +3,7 @@ __pycache__/
 config/api_keys.json
 memory/long_term.json
 memory/skills/
+atlas.log
 jarvis.log
 dist/
 build/
@@ -12,10 +13,15 @@ config/msal_cache.bin
 models/
 backups/
 memory/.version
+Atlas.exe
 Jarvis.exe
 memory/*.corrupt-*.json
+memory/atlas_id.session
 memory/jarvis_id.session
 memory/sync.db
 config/*.tmp
 memory/*.tmp
-memory/ack-*.pcm
+memory/ack*.pcm
+.superpowers/
+*.bak_*
+Atlas.spec

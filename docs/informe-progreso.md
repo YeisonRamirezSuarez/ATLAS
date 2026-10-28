@@ -1,4 +1,4 @@
-# Informe de progreso: autonomía de JARVIS
+# Informe de progreso: autonomía de ATLAS
 
 > Informe histórico de la versión 2.1.0. El estado actual está en el [README](../readme.md).
 
@@ -10,7 +10,7 @@ Regla de este informe: generar código no es completar una función. "Verificado
 
 | Capacidad | Estado | Evidencia |
 |---|---|---|
-| Planificador (objetivo, plan, herramientas, ejecución, observación, corrección) | Verificado | `agent/planner.py`, `agent/executor.py`: plan JSON, reintento, saltar paso, replanificar (2 veces), análisis de error. Pruebas en `tests/test_core.py` |
+| Agente ReAct (objetivo, acción, observación, corrección, verificación) | Verificado | `agent/executor.py`: bucle ReAct, una llamada al modelo por turno, errores como observación, respuesta final contrastada con las salidas, tope de 12 turnos. Pruebas `ReActTests` en `tests/test_core.py` |
 | Registro de herramientas con disponibilidad real | Verificado (nuevo) | `tool_status()` en `agent/executor.py`, herramienta `capabilities`. Ejecutado en este PC |
 | Investigación web autónoma | Verificado | `actions/web_search.py` (ddgs, con fecha y fuente). Nuevo: `solve_task` busca en la web tras el primer fallo |
 | Constructor de skills | Verificado | `solve_task` escribe un script, lo prueba, lo reintenta y guarda solo los que funcionan |
@@ -27,7 +27,7 @@ Regla de este informe: generar código no es completar una función. "Verificado
 
 ### 1. Registro dinámico de herramientas (Etapa B)
 
-1. **Objetivo:** que JARVIS sepa qué puede hacer en este equipo antes de prometerlo.
+1. **Objetivo:** que ATLAS sepa qué puede hacer en este equipo antes de prometerlo.
 2. **Cambio:** `tool_status()` importa el módulo de cada herramienta y comprueba sus paquetes opcionales (`_REQUIRES`). Informa del sistema operativo y del número de skills aprendidas. Se expone como herramienta `capabilities`.
 3. **Archivos:** `agent/executor.py`, `main.py`.
 4. **Pruebas:** ejecución real en este PC.
@@ -59,7 +59,7 @@ Regla de este informe: generar código no es completar una función. "Verificado
 
 ### 4. Controlador SP621E por Bluetooth (Etapa E)
 
-1. **Objetivo:** "JARVIS, conecta mi ordenador por Bluetooth al controlador SP621E y cambia las luces a color morado".
+1. **Objetivo:** "ATLAS, conecta mi ordenador por Bluetooth al controlador SP621E y cambia las luces a color morado".
 2. **Cambio:** nueva herramienta `ble_light` (acciones: `color`, `on`, `off`, `status`, `scan`) sobre `bleak`. El protocolo viene del proyecto UniLED (`lib/ble/banlanx2.py`, licencia MIT). No se inventó ningún comando:
    - Característica `0000ffe1-0000-1000-8000-00805f9b34fb` (servicio `ffe0`), para escribir y para notificar.
    - Encendido: `A0 62 01 01`. Efecto sólido: `A0 63 01 BE`. Color: `A0 69 04 R G B FF`. Consulta de estado: `A0 70 00`.
@@ -75,7 +75,7 @@ Regla de este informe: generar código no es completar una función. "Verificado
    - En Linux hace falta BlueZ. En macOS, el permiso de Bluetooth del sistema.
 7. **Revertir:** borrar `actions/ble_light.py` y sus entradas en `executor.py`, `planner.py` y `main.py`.
 
-**Prueba física pendiente:** encender el SP621E, cerrar la app del móvil y decir "JARVIS, pon las luces en morado". La respuesta debe empezar por "Verified".
+**Prueba física pendiente:** encender el SP621E, cerrar la app del móvil y decir "ATLAS, pon las luces en morado". La respuesta debe empezar por "Verified".
 
 ## En desarrollo
 
@@ -85,7 +85,7 @@ Nada.
 
 - **MCP externo:** conectar servidores MCP de terceros al motor Claude (`mcp_servers` en `engines.py`). Solo si aporta algo que no hagan las herramientas nativas.
 - **Telethon en `.venv`:** instalar las dependencias de `requirements.txt` en el entorno de desarrollo para que Telegram funcione.
-- **Prueba en el PC del usuario con la app abierta:** decir "JARVIS, qué herramientas tienes disponibles" (usa `capabilities`).
+- **Prueba en el PC del usuario con la app abierta:** decir "ATLAS, qué herramientas tienes disponibles" (usa `capabilities`).
 
 ## Bloqueado
 
@@ -94,7 +94,7 @@ Nada.
 
 ## No aplicable
 
-- Reentrenar el modelo. JARVIS aprende guardando skills y memoria, no cambiando el modelo.
+- Reentrenar el modelo. ATLAS aprende guardando skills y memoria, no cambiando el modelo.
 
 ## Pruebas de aceptación
 

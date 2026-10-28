@@ -2,8 +2,10 @@
 
 Run:  python -m unittest discover tests
 """
+import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,8 +17,9 @@ for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, "reconfigure"):
         _s.reconfigure(errors="replace")
 
+import numpy.random   # imported up front: a lazy import racing a test's leftover thread hit CPython's KeyError
 import config
-from agent import executor, llm, planner
+from agent import executor, llm
 from memory import memory_manager
 
 
@@ -40,6 +43,12 @@ class ConfigTests(unittest.TestCase):
         with mock.patch.object(config, "get_config", side_effect=FileNotFoundError):
             self.assertEqual(config.get_engine()[0], "gemini")
 
+    def test_no_retired_gemini_2_5_flash_default(self):
+        # Google 404s "gemini-2.5-flash" for new users; native-audio preview is a different model.
+        for p in config.PROVIDERS.values():
+            for m in [p["model"], *p.get("models", [])]:
+                self.assertNotRegex(m, r"gemini-2\.5-flash$")
+
 
 class LLMTests(unittest.TestCase):
     def test_subscription_never_uses_api_key(self):
@@ -48,6 +57,33 @@ class LLMTests(unittest.TestCase):
             env = llm.subscription_options("", "m").env
         self.assertEqual(env["ANTHROPIC_API_KEY"], "")
         self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "tok")
+
+    def test_skills_only_when_asked(self):
+        with mock.patch.object(llm, "get_config", return_value={}):
+            lean = llm.subscription_options("", "m")
+            full = llm.subscription_options("", "m", tools=["Skill"], setting_sources=llm.SKILL_SOURCES)
+        self.assertEqual((lean.setting_sources, lean.tools), ([], []))   # helper calls stay lean
+        self.assertEqual(full.setting_sources, ["user", "project"])
+        self.assertNotIn("CLAUDE_CONFIG_DIR", full.env)   # the master ~/.claude, shared with the profiles
+        self.assertNotIn("settings", lean.extra_args)
+        self.assertTrue(json.loads(full.extra_args["settings"])["disableAllHooks"])   # no caveman/superpowers in ATLAS
+        self.assertIn("strict-mcp-config", lean.extra_args)   # claude.ai connectors made helpers think they had tools
+        with mock.patch.object(llm.Path, "read_text", return_value='{"enabledPlugins": '
+                               '{"superpowers@official": true, "caveman@caveman": true}}'):
+            dev = json.loads(llm._skills_only(("superpowers",)))["enabledPlugins"]
+        self.assertEqual(dev, {"superpowers@official": True, "caveman@caveman": False})
+
+    def test_work_folder_marked_trusted_keeping_the_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / ".claude.json"
+            cfg.write_text(json.dumps({"numStartups": 3, "projects": {"C:/x": {"allowedTools": []}}}), encoding="utf-8")
+            llm.trust_folder(tmp, cfg)
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            self.assertTrue(data["projects"][Path(tmp).resolve().as_posix()]["hasTrustDialogAccepted"])
+            self.assertEqual((data["numStartups"], data["projects"]["C:/x"]), (3, {"allowedTools": []}))
+            mtime = cfg.stat().st_mtime_ns
+            llm.trust_folder(tmp, cfg)
+            self.assertEqual(cfg.stat().st_mtime_ns, mtime)   # already trusted: not rewritten
 
     def test_auth_errors_detected(self):
         self.assertTrue(llm.is_auth_error("Failed to authenticate: OAuth session expired"))
@@ -78,16 +114,89 @@ class LLMTests(unittest.TestCase):
                 llm.complete("hi")
 
 
-class PlannerTests(unittest.TestCase):
-    def test_valid_fills_defaults(self):
-        plan = planner._valid({"steps": [{"tool": "web_search"}]})
-        self.assertEqual(plan["steps"][0]["step"], 1)
-        self.assertEqual(plan["steps"][0]["parameters"], {})
+class ReActTests(unittest.TestCase):
+    """Task eval set: scripted model replies, real loop. Each case also pins the LLM call count."""
 
-    def test_valid_rejects_step_without_tool(self):
-        for bad in ({}, {"steps": "x"}, {"steps": [{"description": "no tool"}]}):
-            with self.assertRaises(ValueError):
-                planner._valid(bad)
+    def run_agent(self, replies, tools=None, cancel=None):
+        replies, prompts, calls, spoken, steps = list(replies), [], [], [], []
+        tools = tools or {}
+
+        def fake_llm(prompt, system="", **kw):
+            prompts.append(prompt)
+            r = replies.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        def fake_tool(tool, params, speak):
+            calls.append((tool, params))
+            out = tools.get(tool, "ok")
+            if isinstance(out, Exception):
+                raise out
+            return out
+
+        with mock.patch.object(llm, "complete_json", side_effect=fake_llm), \
+             mock.patch.object(executor, "_call_tool", side_effect=fake_tool), \
+             mock.patch.object(memory_manager, "load_memory", return_value={}):
+            result = executor.AgentExecutor().execute("the goal", speak=spoken.append,
+                                                      cancel_flag=cancel, on_step=steps.append)
+        return result, prompts, calls, spoken, steps
+
+    def test_simple_task_costs_one_call(self):
+        result, prompts, calls, spoken, steps = self.run_agent([
+            {"thought": "open it", "actions": [{"tool": "open_app", "parameters": {"app_name": "Chrome"}}],
+             "final": "Chrome is open, sir."}])
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(calls, [("open_app", {"app_name": "Chrome"})])
+        self.assertEqual((result, spoken), ("Chrome is open, sir.", ["Chrome is open, sir."]))
+        self.assertEqual(steps, ["1. open_app: open it"])
+
+    def test_next_turn_sees_outputs_and_answers_from_them(self):
+        result, prompts, calls, _, _ = self.run_agent([
+            {"thought": "look it up", "actions": [{"tool": "web_search", "parameters": {"query": "btc"}}]},
+            {"thought": "answer", "final": "Bitcoin is at 90k, sir.", "done": True}],
+            tools={"web_search": "BTC 90,000 USD"})
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("OUTPUT: BTC 90,000 USD", prompts[1])
+        self.assertEqual(result, "Bitcoin is at 90k, sir.")
+
+    def test_error_is_observed_and_later_actions_wait(self):
+        result, prompts, calls, _, _ = self.run_agent([
+            {"thought": "write then open", "final": "Done, sir.", "actions": [
+                {"tool": "file_controller", "parameters": {"action": "write"}},
+                {"tool": "cmd_control", "parameters": {"task": "open it"}}]},
+            {"thought": "retry", "actions": [{"tool": "generated_code", "parameters": {"description": "x"}}],
+             "final": "Saved, sir."}],
+            tools={"file_controller": RuntimeError("Could not write: disk full")})
+        self.assertEqual([t for t, _ in calls], ["file_controller", "generated_code"])
+        self.assertIn("ERROR: Could not write: disk full", prompts[1])
+        self.assertEqual(result, "Saved, sir.")
+
+    def test_failed_goal_is_reported_not_claimed(self):
+        result, *_ = self.run_agent([{"thought": "no way", "final": "I could not find it, sir.", "done": False}])
+        self.assertEqual(result, "I could not find it, sir.")
+
+    def test_bad_reply_gets_one_retry_then_fails(self):
+        result, prompts, *_ = self.run_agent([ValueError("no JSON"), {"final": "ok, sir.", "done": True}])
+        self.assertIn("could not be used", prompts[1])
+        self.assertEqual(result, "ok, sir.")
+        with self.assertRaises(RuntimeError):
+            self.run_agent([ValueError("no JSON"), ValueError("no JSON")])
+
+    def test_turn_cap_and_cancel(self):
+        loop = {"thought": "again", "actions": [{"tool": "web_search", "parameters": {}}]}
+        result, prompts, *_ = self.run_agent([loop] * executor.MAX_TURNS)
+        self.assertEqual(len(prompts), executor.MAX_TURNS)
+        self.assertIn("stopped after", result)
+        stop = threading.Event(); stop.set()
+        result, prompts, calls, *_ = self.run_agent([], cancel=stop)
+        self.assertEqual((result, prompts, calls), ("Task cancelled, sir.", [], []))
+
+    def test_risky_script_asks_and_stops(self):
+        result, prompts, _, spoken, _ = self.run_agent(
+            [{"thought": "delete", "actions": [{"tool": "generated_code", "parameters": {"description": "rm"}}]}],
+            tools={"generated_code": executor.NeedsConfirmation("NEEDS CONFIRMATION. ask")})
+        self.assertEqual((len(prompts), result), (1, "NEEDS CONFIRMATION. ask"))
 
 
 class ExecutorTests(unittest.TestCase):
@@ -260,6 +369,11 @@ class MemoryTests(unittest.TestCase):
                      "Never let a joke delay, replace or soften a", "never present a guess as certain"):
             self.assertIn(rule, text)
 
+    def test_prompt_searches_memory_first_on_personal_topics(self):
+        text = (Path(__file__).resolve().parent.parent / "core" / "prompt.txt").read_text(encoding="utf-8")
+        for rule in ("call search_memory FIRST", "Never ask the user something already stored in memory"):
+            self.assertIn(rule, text)
+
     def test_corrupt_file_is_kept_not_overwritten(self):
         self.path.write_text("{broken", encoding="utf-8")
         self.assertEqual(memory_manager.load_memory(), memory_manager._empty_memory())
@@ -304,26 +418,108 @@ class MainToolResultTests(unittest.TestCase):
     def test_tool_timeouts_cover_default(self):
         self.assertIn("default", self.main.TOOL_TIMEOUTS)
 
-    def test_tts_quota_keeps_voice_with_live(self):
-        import asyncio, engines
-        j = engines.CascadeJarvis.__new__(engines.CascadeJarvis)
-        j.cfg, spoke = {"gemini_api_key": "k"}, []
+    def test_saving_settings_ends_the_engine(self):
+        import asyncio, types
+        ui, stopped = types.SimpleNamespace(on_config_saved=None), []
 
-        async def quota(_):
-            raise RuntimeError("429 Too Many Requests 'retryDelay': '600s'")
+        class Engine:
+            async def run(self):
+                try:
+                    await asyncio.sleep(60)
+                finally:
+                    stopped.append(True)   # audio streams close in finally / with blocks
+
+        threading.Timer(0.2, lambda: ui.on_config_saved()).start()   # the Save click, from the Qt thread
+        asyncio.run(self.main._run_until_saved(ui, Engine()))
+        self.assertEqual(stopped, [True])
+
+    def test_one_voice_reconnects_live_before_edge_tts(self):
+        import asyncio, engines
+        j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
+        j.cfg, spoke, calls = {"gemini_api_key": "k"}, [], iter([RuntimeError("closed while idle"), None])
 
         async def live(text):
+            if e := next(calls):
+                raise e
             spoke.append(text)
-        j._gemini_tts, j._live_tts = quota, live
+        j._live_tts = live
         with mock.patch.object(engines.edge_tts, "Communicate", side_effect=AssertionError("voice changed")):
             asyncio.run(j._tts_now("hola"))
-            asyncio.run(j._tts_now("otra"))   # inside the quota window: straight to Live
-        self.assertEqual(spoke, ["hola", "otra"])
-        self.assertGreater(j._tts_quota_until, engines.time.time() + 500)
+        self.assertEqual(spoke, ["hola"])
+
+    def test_interrupted_read_keeps_the_same_live_session(self):
+        import asyncio, contextlib, engines, numpy as np
+        from types import SimpleNamespace as NS
+        opened = []
+
+        class Session:   # one message stream; each turn: 3 audio chunks, then turn_complete
+            def __init__(self):
+                self.msgs = asyncio.Queue()
+            async def __aenter__(self):
+                opened.append(self)
+                return self
+            async def __aexit__(self, *exc):
+                return False
+            async def send_client_content(self, turns, turn_complete):
+                tag = {"one": -1000, "two": 1000}[turns["parts"][0]["text"]]
+                for _ in range(3):
+                    part = NS(inline_data=NS(data=np.full(12000, tag, np.int16).tobytes()))
+                    self.msgs.put_nowait(NS(server_content=NS(output_transcription=None, model_turn=NS(parts=[part]))))
+                self.msgs.put_nowait(None)
+            async def receive(self):
+                while (m := await self.msgs.get()) is not None:
+                    await asyncio.sleep(0.01)
+                    yield m
+
+        j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
+        j._tts_client = NS(aio=NS(live=NS(connect=lambda **kw: Session())))
+
+        async def go():
+            j.audio_in_queue = asyncio.Queue()
+            t = asyncio.ensure_future(j._live_tts("one"))
+            await asyncio.sleep(0.025)
+            t.cancel()   # the user interrupted the first read
+            with contextlib.suppress(asyncio.CancelledError):
+                await t
+            j.audio_in_queue = asyncio.Queue()
+            await j._live_tts("two")
+            return b"".join(j.audio_in_queue.get_nowait() for _ in range(j.audio_in_queue.qsize()))
+
+        played = np.frombuffer(asyncio.run(go()), np.int16)
+        self.assertEqual(len(opened), 1)        # a new session would read in another tone
+        self.assertGreaterEqual(played.min(), 0)   # nothing of the cut read leaks into the next one
+        self.assertIn(1000, set(played))
+
+    def test_tail_noise_is_cut_and_speech_kept(self):
+        import numpy as np
+        rng = np.random.default_rng(0)
+        t = np.arange(24000) / 24000
+        speech = (8000 * np.sin(2 * np.pi * 180 * t)).astype(np.int16)
+        hiss = rng.integers(-20000, 20000, 3600).astype(np.int16)   # 150 ms radio-like burst
+        pcm = np.concatenate([speech, np.zeros(6000, np.int16), hiss]).tobytes()
+        out = np.frombuffer(self.main.clean_tail(pcm), np.int16)
+        self.assertLessEqual(len(out), 24000 + 6000)
+        self.assertLess(abs(out[-2000:].astype(int)).max(), 300)
+        self.assertEqual(len(self.main.clean_tail(speech.tobytes())), len(speech) * 2)   # no hiss: untouched length
+        self.assertEqual(out[-1], 0)   # faded: no click
+
+    def test_slow_tool_moves_to_background_and_reports_later(self):
+        import asyncio, threading
+        m = self.main
+        j = m.AtlasLive.__new__(m.AtlasLive)
+        j.ui, done, notes = mock.MagicMock(), threading.Event(), []
+        j._deliver = lambda note: (notes.append(note), done.set())
+
+        async def go():
+            with mock.patch.object(m, "TOOL_TIMEOUTS", {"default": 0.05}),                  mock.patch.object(m, "get_config", return_value={}):
+                return await j._run_blocking("web_search", lambda: threading.Event().wait(0.3) or "Found 3 flights")
+        self.assertEqual(asyncio.run(go()), m.STILL_WORKING)
+        self.assertTrue(done.wait(2))
+        self.assertIn("Found 3 flights", notes[0])
 
     def test_background_speech_follows_user_language(self):
         import engines
-        j = engines.CascadeJarvis.__new__(engines.CascadeJarvis)
+        j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
         j.cfg, j._loop, j._last_heard, said = {}, None, "pon música", []
         j._say = said.append
         with mock.patch("agent.llm.complete", return_value="Ajustando mi enfoque, señor.") as c:
@@ -334,9 +530,34 @@ class MainToolResultTests(unittest.TestCase):
             j.speak("Task cancelled, sir.")   # translation down: still speaks
         self.assertEqual(said[-1], "Task cancelled, sir.")
 
+    def test_reader_that_says_something_else_is_logged_and_reset(self):
+        import asyncio, engines
+        from types import SimpleNamespace as NS
+        audio = NS(server_content=NS(output_transcription=None, model_turn=NS(parts=[NS(inline_data=NS(data=bytes(64)))])))
+
+        class Session:
+            async def send_client_content(self, **k): pass
+            async def receive(self):
+                yield NS(server_content=NS(output_transcription=NS(text=self.heard), model_turn=None))
+                yield audio
+        j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
+        j.ui, j._reads, j._play, session = mock.MagicMock(), 0, lambda pcm: None, Session()
+        j._reader, j._close_reader = mock.AsyncMock(return_value=session), mock.AsyncMock()
+        text = "Entendido, señor. No la toco y le aviso cuando termine."
+        session.heard = "Entendido, señor, no la toco y le aviso cuando termine."
+        asyncio.run(j._live_tts(text))
+        j._close_reader.assert_not_called()   # same words, other punctuation: fine
+        session.heard = "Son las tres y cuarenta y cinco, señor."
+        asyncio.run(j._live_tts("Son las 3:45, señor."))
+        j._close_reader.assert_not_called()   # numbers are read out in words
+        session.heard = "Entendido señor, quedo a la espera."
+        asyncio.run(j._live_tts(text))
+        j._close_reader.assert_called_once()
+        self.assertIn("quedo a la espera", j.ui.write_log.call_args.args[0])
+
     def test_message_typed_while_speaking_interrupts_and_is_answered(self):
         import threading, engines
-        j = engines.CascadeJarvis.__new__(engines.CascadeJarvis)
+        j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
         j._loop, j._busy, j._turn, j._wake, j._is_speaking = mock.MagicMock(), False, threading.Lock(), None, False
         j._epoch, j._tts_futs = 0, set()
         j.ui, speaking, heard = mock.MagicMock(muted=False), threading.Event(), []
@@ -376,33 +597,93 @@ class MainToolResultTests(unittest.TestCase):
     def test_silent_slow_tool_gets_a_short_ack_on_every_engine(self):
         import asyncio, engines
         m = self.main
-        live = m.JarvisLive.__new__(m.JarvisLive)
-        cascade = engines.CascadeJarvis.__new__(engines.CascadeJarvis)
-        for j in (live, cascade):
-            j.audio_in_queue = asyncio.Queue()
+        live = m.AtlasLive.__new__(m.AtlasLive)
+        live.audio_in_queue = asyncio.Queue()
         with mock.patch.object(m, "ack_audio", return_value=b"\x01" * 5000):
-            for j in (live, cascade):
-                cascade._voice = engines._Voice(lambda text, wait: None)
-                j._acknowledge("computer_settings")   # instant: no ack
-                self.assertTrue(j.audio_in_queue.empty())
-                j._acknowledge("web_search")
-                self.assertEqual(j.audio_in_queue.qsize(), 2)
-                j._acknowledge("file_controller")   # once per turn
-                self.assertEqual(j.audio_in_queue.qsize(), 2)
+            live._acknowledge("computer_settings")   # instant: no ack
+            self.assertTrue(live.audio_in_queue.empty())
+            live._acknowledge("web_search")
+            self.assertEqual(live.audio_in_queue.qsize(), 2)
+            live._acknowledge("file_controller")   # once per turn
+            self.assertEqual(live.audio_in_queue.qsize(), 2)
             live._turn_audio = False   # new turn, and the model announced it itself
-            cascade._voice = engines._Voice(lambda text, wait: None)
-            cascade._voice.end("Lo busco ahora mismo, señor.")
             live._spoke(mark=True)
-            for j in (live, cascade):
-                j._acknowledge("web_search")
-                self.assertEqual(j.audio_in_queue.qsize(), 2)
+            live._acknowledge("web_search")
+            self.assertEqual(live.audio_in_queue.qsize(), 2)
+        # cascade: the same reader as the reply says it, not a clip from another session
+        cascade, said = engines.CascadeAtlas.__new__(engines.CascadeAtlas), []
+        cascade._voice = engines._Voice(lambda text, wait: said.append(text))
+        cascade._acknowledge("computer_settings")
+        cascade._acknowledge("web_search")
+        cascade._acknowledge("file_controller")
+        self.assertEqual(said, [m.ACK[m._ack_lang()]])
+        cascade._voice = engines._Voice(lambda text, wait: said.append(text))
+        cascade._voice.end("Lo busco ahora mismo, señor.")
+        cascade._acknowledge("web_search")
+        self.assertEqual(said[1:], ["Lo busco ahora mismo, señor."])
 
     def test_gemini_voice_still_works_after_a_reply(self):
         import engines
-        j = engines.CascadeJarvis.__new__(engines.CascadeJarvis)
+        j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
         j._voice = engines._Voice(lambda text, wait: None)   # what every reply leaves behind
-        cfg = j._speech_config()   # 2.3.0 called the _Voice instead: Jarvis fell back to edge-tts
-        self.assertEqual(cfg.voice_config.prebuilt_voice_config.voice_name, engines.VOICE_NAME)
+        import voice
+        with mock.patch.object(voice, "get_config", return_value={}):
+            cfg = engines.speech_config()   # 2.3.0 called the _Voice instead: Atlas fell back to edge-tts
+        self.assertEqual(cfg.voice_config.prebuilt_voice_config.voice_name, self.main.VOICE_NAME)
+
+    def test_hud_shows_speaking_while_a_step_runs(self):
+        import asyncio, threading
+        from types import SimpleNamespace as NS
+        m = self.main
+        j = m.AtlasLive.__new__(m.AtlasLive)
+        j.ui, j._wake, j._speaking_lock, j._is_speaking = mock.MagicMock(muted=False), None, threading.Lock(), False
+        j._acknowledge = lambda name: None
+        states = lambda: [c.args[0] for c in j.ui.set_state.call_args_list]
+
+        async def step(fc):
+            j.set_speaking(True)    # "en eso estoy" starts playing while the step runs
+            self.assertEqual(states()[-1], "SPEAKING")
+            j.set_speaking(False)   # said: still working
+            self.assertEqual(states()[-1], "THINKING")
+            j.set_speaking(True)
+        j._dispatch_tool = step
+        j.ui.set_state.reset_mock()
+        asyncio.run(j._execute_tool(NS(name="web_search")))
+        self.assertEqual(states()[0], "THINKING")
+        self.assertEqual(states()[-1], "SPEAKING")   # the step ended mid-sentence: still talking
+        j.set_speaking(False)
+        self.assertEqual(states()[-1], "LISTENING")
+        j.ui.muted = True   # muted: it still talks and works, idle shows SILENCIADO
+        j.set_speaking(True)
+        self.assertEqual(states()[-1], "SPEAKING")
+        j.set_speaking(False)
+        self.assertEqual(states()[-1], "MUTED")
+
+    def test_silent_read_is_asked_again(self):
+        import asyncio, engines
+        from types import SimpleNamespace as NS
+        sent = []
+
+        class Session:   # first turn: a thought only, no audio (1 in 3 short lines on the real API)
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *exc):
+                return False
+            async def send_client_content(self, turns, turn_complete):
+                sent.append(turns["parts"][0]["text"])
+            async def receive(self):
+                if len(sent) > 1:
+                    yield NS(server_content=NS(output_transcription=None, model_turn=NS(parts=[NS(inline_data=NS(data=b"\x10\x00" * 2000))])))
+
+        j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
+        j._tts_client = NS(aio=NS(live=NS(connect=lambda **kw: Session())))
+
+        async def go():
+            j.audio_in_queue = asyncio.Queue()
+            await j._live_tts("Listo, señor.")
+            return j.audio_in_queue.qsize()
+        self.assertGreater(asyncio.run(go()), 0)
+        self.assertEqual(sent, ["Listo, señor.", "Listo, señor."])
 
     def test_wake_word_interrupts_even_while_awake(self):
         import wakeword
@@ -412,33 +693,50 @@ class MainToolResultTests(unittest.TestCase):
         self.assertEqual(g.feed(b"a"), [b"a"])   # awake: normal speech passes as it is
         self.assertEqual(g.listen(b"x"), [])
         self.assertEqual(g.listen(b"y"), [])
-        self.assertEqual(g.listen(b"z"), [b"x", b"y", b"z"])   # "Jarvis, para": the whole utterance
-        self.assertTrue(self.main._names_itself("Soy J.A.R.V.I.S., su asistente"))
+        self.assertEqual(g.listen(b"z"), [b"x", b"y", b"z"])   # "Atlas, para": the whole utterance
+        self.assertTrue(self.main._names_itself("Soy A.T.L.A.S., su asistente"))
+
         self.assertFalse(self.main._names_itself("Claro, señor."))
+
+    def test_barge_in_needs_the_user_louder_than_the_echo(self):
+        import numpy as np
+        tone = lambda amp: (np.sin(np.arange(1024) / 5) * amp).astype(np.int16).tobytes()
+        b = self.main.BargeIn({})
+        for _ in range(40):
+            b.hear(tone(1500))                               # ATLAS's own voice coming back
+        self.assertFalse(b.allows([tone(1500)] * 12))        # "hasta las..." heard as "Atlas": echo, ignored
+        self.assertTrue(b.allows([tone(200)] * 3 + [tone(4500)] * 9))   # the user, close to the mic
+        self.assertFalse(self.main.BargeIn({"barge_in": "off"}).allows([tone(9000)] * 9))
+        self.assertTrue(self.main.BargeIn({"barge_in": "instant"}).allows([tone(10)]))
+        self.assertEqual(self.main.BargeIn({"barge_in_level_mult": "x"}).mult, 2.0)
 
     def test_interrupt_drops_queued_audio_and_the_rest_of_the_live_reply(self):
         import asyncio
         m = self.main
-        j = m.JarvisLive.__new__(m.JarvisLive)
+        j = m.AtlasLive.__new__(m.AtlasLive)
         j._is_speaking, j._speaking_lock, j._wake, j._turn_done, j._drop_audio = True, __import__("threading").Lock(), None, False, False
         j.ui = mock.MagicMock(muted=False)
         j.audio_in_queue = asyncio.Queue()
         for _ in range(3):
-            j.audio_in_queue.put_nowait(b"\x00" * 64)
+            j.audio_in_queue.put_nowait(b"\x10\x27" * 4000)
         j._interrupt_now()
-        self.assertTrue(j.audio_in_queue.empty())
+        self.assertEqual(j.audio_in_queue.qsize(), 1)   # only a short fade-out is left to play
+        fade = j.audio_in_queue.get_nowait()
+        self.assertIs(fade, j._fade)
+        self.assertEqual((len(fade), fade[-2:]), (9600, b"\x00\x00"))
         self.assertFalse(j._is_speaking)
         self.assertTrue(j._drop_audio)   # the server is still sending this reply
 
     def test_interrupted_reply_goes_silent_but_its_step_still_runs(self):
         import engines
-        said, alive = [], [True]
-        v = engines._Voice(lambda text, wait: said.append(text), lambda: alive[0])
+        said, logged, alive = [], [], [True]
+        v = engines._Voice(lambda text, wait: said.append(text), lambda: alive[0], logged.append)
         v.end("Primera parte.")
         alive[0] = False
         v.feed("Segunda parte que ya no. ")
         v.end("Segunda parte que ya no.")
         self.assertEqual(said, ["Primera parte."])
+        self.assertEqual(logged, said)   # the log shows what was said, not a reply cut short
 
         brain = engines._OpenAICompat.__new__(engines._OpenAICompat)
         brain.model, brain.tools, brain.limit, brain.system, brain.msgs, brain.sys_fn = "m", [], {}, "", [], str
@@ -458,7 +756,7 @@ class MainToolResultTests(unittest.TestCase):
 
     def test_step_interrupted_keeps_running_and_resumes_the_task(self):
         import asyncio, threading, engines
-        j = engines.CascadeJarvis.__new__(engines.CascadeJarvis)
+        j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
         j._epoch, j._turn_text = 0, "limpia los temporales y dime cuánto liberaste"
         loop = asyncio.new_event_loop()
         threading.Thread(target=loop.run_forever, daemon=True).start()
@@ -485,7 +783,7 @@ class MainToolResultTests(unittest.TestCase):
     def test_live_tool_dropped_by_interruption_reports_back_as_a_turn(self):
         import asyncio
         m = self.main
-        j = m.JarvisLive.__new__(m.JarvisLive)
+        j = m.AtlasLive.__new__(m.AtlasLive)
         j._cancelled_calls = {"c1"}
         j.session = mock.MagicMock(send_tool_response=mock.AsyncMock(), send_client_content=mock.AsyncMock())
         fc = mock.MagicMock(id="c1")
@@ -507,7 +805,7 @@ class MainToolResultTests(unittest.TestCase):
     def test_mic_reopens_when_turn_ends_after_last_chunk(self):
         import asyncio, threading
         m = self.main
-        j = m.JarvisLive.__new__(m.JarvisLive)
+        j = m.AtlasLive.__new__(m.AtlasLive)
         j._is_speaking, j._speaking_lock, j._wake, j._turn_done = False, threading.Lock(), None, False
         j.ui = mock.MagicMock(muted=False)
 
@@ -525,19 +823,40 @@ class MainToolResultTests(unittest.TestCase):
         with mock.patch.object(m.sd, "RawOutputStream"):
             self.assertFalse(asyncio.run(run()))
 
+    def test_lost_output_device_reopens_instead_of_ending_the_engine(self):
+        import asyncio, threading
+        m = self.main
+        j = m.AtlasLive.__new__(m.AtlasLive)
+        j._is_speaking, j._speaking_lock, j._wake, j._turn_done = False, threading.Lock(), None, False
+        j.ui = mock.MagicMock(muted=False)
+        gone, fresh = mock.MagicMock(latency=0.0), mock.MagicMock(latency=0.0)
+        gone.write.side_effect = m.sd.PortAudioError("There is no driver installed on your system.")
+
+        async def run():
+            j.audio_in_queue = asyncio.Queue()
+            task = asyncio.create_task(j._play_audio())
+            j.audio_in_queue.put_nowait(b"\0" * 64)
+            await asyncio.sleep(0.5)
+            alive = not task.done()
+            task.cancel()
+            return alive
+        with mock.patch.object(m.sd, "RawOutputStream", side_effect=[gone, fresh, fresh]):
+            self.assertTrue(asyncio.run(run()))
+        fresh.write.assert_called()   # the chunk played on the reopened output
+
     def test_boot_prompt_introduces_on_empty_memory_and_greets_on_login(self):
         m = self.main
-        j = m.JarvisLive.__new__(m.JarvisLive)
+        j = m.AtlasLive.__new__(m.AtlasLive)
         with mock.patch.object(m, "load_memory", return_value={"identity": {}, "style": {"humor": "low"}}):
             self.assertIn("first time", j._boot_prompt())
             self.assertIsNone(j._boot_prompt())   # once per run
         j._booted = False
         known = {"identity": {"name": {"value": "Pablo"}}}
         with mock.patch.object(m, "load_memory", return_value=known):
-            with mock.patch.object(m.sys, "argv", ["jarvis.pyw"]):
+            with mock.patch.object(m.sys, "argv", ["atlas.pyw"]):
                 self.assertIsNone(j._boot_prompt())   # a normal start says nothing
             j._booted = False
-            with mock.patch.object(m.sys, "argv", ["jarvis.pyw", "--autostart"]):
+            with mock.patch.object(m.sys, "argv", ["atlas.pyw", "--autostart"]):
                 self.assertIn("computer just started", j._boot_prompt())
 
     def test_task_status_tool_declared(self):
@@ -555,7 +874,7 @@ class AutostartTests(unittest.TestCase):
                     self.assertFalse(autostart.enabled())
                     autostart.set_enabled(True)
                     self.assertTrue(autostart.enabled())
-                    self.assertIn("jarvis.pyw", path.read_text(encoding="utf-8", errors="replace"))
+                    self.assertIn("atlas.pyw", path.read_text(encoding="utf-8", errors="replace"))
                     autostart.set_enabled(False)
                     self.assertFalse(autostart.enabled())
 
@@ -563,9 +882,9 @@ class AutostartTests(unittest.TestCase):
         import autostart
         with tempfile.TemporaryDirectory() as d:
             app = Path(d) / "app"; app.mkdir()
-            (Path(d) / "Jarvis.exe").touch()
+            (Path(d) / "Atlas.exe").touch()
             with mock.patch.object(autostart, "_OS", "Windows"), mock.patch.object(autostart, "BASE", app):
-                self.assertEqual(autostart.command(), [str(Path(d) / "Jarvis.exe"), "--autostart"])
+                self.assertEqual(autostart.command(), [str(Path(d) / "Atlas.exe"), "--autostart"])
 
 
 class SelfImproveTests(unittest.TestCase):
@@ -640,15 +959,15 @@ class EngramTests(unittest.TestCase):
         import os
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"ENGRAM_DATA_DIR": d}):
             lines = memory_manager.diagnose()
-            self.assertTrue(any(l.startswith("Engram write/read/delete: ok") for l in lines), lines)
-            self.assertIn("No memories found", memory_manager.search_memory("jarvis boot probe"))
+            self.assertTrue(any(l.startswith("Engram escribir/leer/borrar: ok") for l in lines), lines)
+            self.assertIn("No memories found", memory_manager.search_memory("atlas boot probe"))
 
     def test_boot_diagnostic_reports_failure(self):
         import subprocess
         bad = subprocess.CompletedProcess([], 1, "", "error: disk full\n")
         with mock.patch.object(memory_manager, "ENGRAM_BIN", "engram"), \
              mock.patch.object(memory_manager.subprocess, "run", return_value=bad):
-            self.assertIn("FAILED at write (error: disk full)", memory_manager.diagnose()[-1])
+            self.assertIn("FALLÓ al escribir (error: disk full)", memory_manager.diagnose()[-1])
 
 
 if __name__ == "__main__":

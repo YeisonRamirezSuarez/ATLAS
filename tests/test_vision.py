@@ -36,7 +36,7 @@ class _FakeSession:
         self.sent = asyncio.Queue()
 
     async def send_client_content(self, turns, turn_complete):
-        await self.sent.put(turns["parts"][1]["text"])
+        await self.sent.put(turns["parts"][-1]["text"])
 
     async def receive(self):
         # Like google-genai: one call yields a single turn, then stops.
@@ -83,7 +83,7 @@ class ScreenProcessTests(unittest.TestCase):
 
     def test_analyze_timeout_is_reported(self):
         with mock.patch.object(sp, "_get_api_key", return_value="k"), \
-             mock.patch.object(sp, "_capture_screenshot", return_value=b"jpg"), \
+             mock.patch.object(sp, "_capture_screenshot", return_value=[("main screen", b"jpg")]), \
              mock.patch.object(sp, "_ensure_started"), \
              mock.patch.object(sp._live, "analyze", side_effect=TimeoutError):
             result = sp.screen_process({"text": "what is this?"})
@@ -91,11 +91,41 @@ class ScreenProcessTests(unittest.TestCase):
 
     def test_answer_text_or_audio_only(self):
         with mock.patch.object(sp, "_get_api_key", return_value="k"), \
-             mock.patch.object(sp, "_capture_screenshot", return_value=b"jpg"), \
+             mock.patch.object(sp, "_capture_screenshot", return_value=[("main screen", b"jpg")]), \
              mock.patch.object(sp, "_ensure_started"), \
              mock.patch.object(sp._live, "analyze", side_effect=["A red window.", ""]):
             self.assertEqual(sp.screen_process({"text": "q"}), "Vision answer: A red window.")
             self.assertNotRegex(sp.screen_process({"text": "q"}), FAILURE)
+
+    def test_all_monitors_labeled_left_to_right(self):
+        # The user's layout: DISPLAY3 left, DISPLAY1 primary at 0,0, DISPLAY2 right.
+        monitors = [
+            {"left": -1600, "top": 0, "width": 3520 + 1600, "height": 1206},   # virtual desktop
+            {"left": 0, "top": 0, "width": 1920, "height": 1200},
+            {"left": 1920, "top": 6, "width": 1920, "height": 1080},
+            {"left": -1600, "top": 6, "width": 1600, "height": 900},
+        ]
+        sct = mock.MagicMock()
+        sct.__enter__.return_value = sct
+        sct.monitors = monitors
+        sct.grab.side_effect = lambda m: SimpleNamespace(rgb=b"", size=(m["width"], m["height"]))
+        with mock.patch.object(sp.mss, "mss", return_value=sct),              mock.patch.object(sp.mss.tools, "to_png", return_value=b"png"),              mock.patch.object(sp, "_to_jpeg", side_effect=lambda b: b"jpg"):
+            shots = sp._capture_screenshot()
+        self.assertEqual([label for label, _ in shots], [
+            "left screen (1600x900)", "center screen (1920x1200, primary)", "right screen (1920x1080)"])
+        self.assertEqual(sct.grab.call_count, 3)   # each monitor, not the virtual desktop
+
+    def test_every_screen_is_sent_with_its_label(self):
+        shots = [("left screen (1600x900)", b"a"), ("center screen (1920x1200, primary)", b"b"),
+                 ("right screen (1920x1080)", b"c")]
+        with mock.patch.object(sp, "_get_api_key", return_value="k"),              mock.patch.object(sp, "_capture_screenshot", return_value=shots),              mock.patch.object(sp, "_ensure_started"),              mock.patch.object(sp._live, "analyze", return_value="Chrome is on the right screen.") as an:
+            result = sp.screen_process({"text": "puedes ver el navegador de Chrome"})
+        self.assertEqual(result, "Vision answer: Chrome is on the right screen.")
+        images, _, question = an.call_args.args
+        self.assertEqual(images, shots)
+        self.assertIn("right screen", question)
+        self.assertIn("ALL", question)
+        self.assertIn("puedes ver el navegador de Chrome", question)
 
     def test_analyze_without_session_fails_fast(self):
         with self.assertRaises(ConnectionError):
@@ -114,13 +144,14 @@ class LiveSessionTests(unittest.TestCase):
         client = mock.MagicMock()
         client.aio.live.connect.return_value = _FakeSession()
         with mock.patch.object(sp, "_get_api_key", return_value="k"), \
-             mock.patch.object(sp.genai, "Client", return_value=client), \
-             mock.patch.object(sp.sd, "RawOutputStream"):
+             mock.patch.object(sp.genai, "Client", return_value=client):
             live = sp._LiveSession()
             live.start()
             # Before the fix the receive loop ended after the first turn.
             self.assertEqual(live.analyze(b"jpg", "image/jpeg", "one", timeout=5), "answer to one")
             self.assertEqual(live.analyze(b"jpg", "image/jpeg", "two", timeout=5), "answer to two")
+            shots = [("left screen", b"a"), ("right screen", b"b")]
+            self.assertEqual(live.analyze(shots, "image/jpeg", "three", timeout=5), "answer to three")
 
 
 if __name__ == "__main__":

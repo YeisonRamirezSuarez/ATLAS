@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from memory import jarvis_id, memory_manager, sync
+from memory import atlas_id, memory_manager, sync
 
 
 class FakeServer:
@@ -24,7 +24,7 @@ class FakeServer:
 
     def rest(self, method, path, headers=None, json=None):
         if not self.online:
-            raise jarvis_id.IDError("JARVIS ID offline (ConnectionError)")
+            raise atlas_id.IDError("ATLAS ID offline (ConnectionError)")
         q = {k: v[0] for k, v in parse_qs(urlparse(path).query.replace("%2B", "+").replace("+", "%2B")).items()}
         q = {k: v.replace("%2B", "+") for k, v in q.items()}
         fid = q.get("id", "").removeprefix("eq.")
@@ -36,7 +36,7 @@ class FakeServer:
             return [dict(r) for r in rows if r]
         if method == "POST":
             if json["id"] in self.rows:
-                err = jarvis_id.IDError("duplicate key")
+                err = atlas_id.IDError("duplicate key")
                 err.status = 409
                 raise err
             self.rows[json["id"]] = {**json, "updated_at": self._tick()}
@@ -56,10 +56,10 @@ class SyncTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(sync, "enabled", return_value=True),
             mock.patch.object(memory_manager, "_engram_save_async"),
-            mock.patch.object(jarvis_id, "rest", side_effect=self.server.rest),
-            mock.patch.object(jarvis_id, "touch_device", return_value=True),
-            mock.patch.object(jarvis_id, "status", return_value={"user_id": "u-1"}),
-            mock.patch.object(jarvis_id, "device_id", return_value="00000000-0000-0000-0000-00000000000a"),
+            mock.patch.object(atlas_id, "rest", side_effect=self.server.rest),
+            mock.patch.object(atlas_id, "touch_device", return_value=True),
+            mock.patch.object(atlas_id, "status", return_value={"user_id": "u-1"}),
+            mock.patch.object(atlas_id, "device_id", return_value="00000000-0000-0000-0000-00000000000a"),
         ]
         for p in self.patches:
             p.start()
@@ -84,13 +84,13 @@ class SyncTests(unittest.TestCase):
     def test_offline_change_waits_then_reaches_the_other_device(self):
         memory_manager.remember("city", "Bucaramanga", "identity")
         self.server.online = False
-        self.assertIn("FAILED", sync.sync_now())
+        self.assertIn("FALLÓ", sync.sync_now())
         self.assertEqual(sync.stats()["pending"], 1)   # not marked as synced
         self.server.online = True
-        self.assertIn("1 sent", sync.sync_now())
+        self.assertIn("1 enviados", sync.sync_now())
         self.assertEqual(sync.stats()["pending"], 0)
         self.device("b")
-        self.assertIn("1 received", sync.sync_now())
+        self.assertIn("1 recibidos", sync.sync_now())
         self.assertEqual(self.fact("identity", "city"), "Bucaramanga")
         memory_manager.forget("city", "identity")
         sync.sync_now()
@@ -107,7 +107,7 @@ class SyncTests(unittest.TestCase):
         sync.sync_now()   # b wins the race: version 2
         self.device("a")
         memory_manager.remember("food", "tacos", "preferences")   # edited version 1
-        self.assertIn("1 conflicts", sync.sync_now())
+        self.assertIn("1 conflictos", sync.sync_now())
         self.assertEqual(self.fact("preferences", "food"), "sushi")
         self.assertEqual(sync.recent_conflicts()[0][:3], ("preferences/food", "tacos", "sushi"))
         self.assertEqual(self.server.rows["preferences/food"]["version"], 2)
@@ -124,21 +124,21 @@ class SyncTests(unittest.TestCase):
         with mock.patch.object(sync, "enabled", return_value=False):
             memory_manager.remember("job", "developer", "identity")
         self.assertEqual(sync.stats()["pending"], 0)
-        self.assertIn("1 sent", sync.sync_now())
+        self.assertIn("1 enviados", sync.sync_now())
 
     def test_describe_tells_the_real_state(self):
-        with mock.patch.object(jarvis_id, "status", return_value={"configured": False, "signed_in": False}):
-            self.assertIn("not set up", sync.describe())
+        with mock.patch.object(atlas_id, "status", return_value={"configured": False, "signed_in": False}):
+            self.assertIn("sin configurar", sync.describe())
         memory_manager.remember("dog", "Toby", "relationships")
-        with mock.patch.object(jarvis_id, "status",
+        with mock.patch.object(atlas_id, "status",
                                return_value={"configured": True, "signed_in": True, "email": "a@b.c", "user_id": "u-1"}):
-            self.assertIn("1 pending", sync.describe())
+            self.assertIn("1 pendientes", sync.describe())
             sync.sync_now()
-            self.assertIn("1 synced, 0 pending", sync.describe())
+            self.assertIn("1 sincronizados, 0 pendientes", sync.describe())
 
     def test_removed_device_signs_out(self):
-        with mock.patch.object(jarvis_id, "touch_device", return_value=False), \
-             mock.patch.object(jarvis_id, "logout") as logout:
+        with mock.patch.object(atlas_id, "touch_device", return_value=False), \
+             mock.patch.object(atlas_id, "logout") as logout:
             self.assertIn("removed", sync.sync_now())
         logout.assert_called_once()
 

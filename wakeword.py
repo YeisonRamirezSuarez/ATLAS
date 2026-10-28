@@ -1,14 +1,15 @@
 """
-Local "Jarvis" wake word: Vosk with a closed Spanish grammar. While asleep, no microphone
+Local "Atlas" wake word: Vosk with a closed Spanish grammar. While asleep, no microphone
 audio leaves the PC; once the wake word is heard the whole utterance that contained it
-("Jarvis, abre Chrome") is passed on and JARVIS keeps listening for `wake_window` seconds.
+("Atlas, abre Chrome") is passed on and ATLAS keeps listening for `wake_window` seconds.
 
 api_keys.json (all optional):
   "wake_word":        "auto"   # auto = on when vosk and the model are installed; true; false = always listening
   "wake_sensitivity": 0.5      # 0..1, higher fires more easily (more false positives, fewer misses)
-  "wake_window":      12       # seconds of open mic after the user's last word or after JARVIS answers
+  "wake_window":      12       # seconds of open mic after the user's last word or after ATLAS answers
   "wake_model":       "models/vosk-model-small-es-0.42"
-  "wake_variants":    ["jarvis", "yarvis", "harbis", ...]
+  "wake_variants":    ["atlas", "atla", "adlas", ...]
+  "wake_end_silence": 2.0      # seconds of quiet that end what the user said; raise it for slow speakers
 """
 import json
 import time
@@ -18,12 +19,12 @@ from pathlib import Path
 BASE_DIR      = Path(__file__).resolve().parent
 DEFAULT_MODEL = "models/vosk-model-small-es-0.42"
 RATE          = 16000
-# How Spanish speakers say and Vosk may spell "Jarvis". Words the model does not know are
+# How Spanish speakers say and Vosk may spell "Atlas". Words the model does not know are
 # dropped by Vosk; tools/wake_eval.py lists which ones the installed model accepts.
-VARIANTS      = ["jarvis", "yarvis", "harbis", "jarbis", "yarbis", "harvis", "llarvis"]
+VARIANTS      = ["atlas", "atla", "adlas", "hatlas", "atlax"]
 MAX_UTTERANCE = 15 * RATE // 1024          # ~15 s of 1024-sample mic chunks
 PRE_ROLL      = 0.3                         # seconds kept before the wake word, for its onset
-END_SILENCE   = 13                          # quiet chunks (~0.8 s) that end what the user said
+END_SILENCE   = 31                          # quiet chunks (~2 s) that end what the user said; wake_end_silence
 
 
 class Detector:
@@ -92,9 +93,9 @@ class WakeGate:
         return self.listen(pcm, voiced)
 
     def listen(self, pcm: bytes, voiced: bool | None = None) -> list[bytes]:
-        """Wake word only, awake or not: while JARVIS talks this is how the user interrupts it.
+        """Wake word only, awake or not: while ATLAS talks this is how the user interrupts it.
         [] until an utterance with the wake word closes, then that utterance from the wake word
-        on: what was said before it is not a request ("...abre Chrome. Jarvis" must not open it)."""
+        on: what was said before it is not a request ("...abre Chrome. Atlas" must not open it)."""
         self.utt.append((self.pos, pcm))
         self.pos += len(pcm) // 2
         fired = self.detect(pcm)
@@ -102,8 +103,8 @@ class WakeGate:
             self.spoke += voiced
             self.quiet = 0 if voiced else self.quiet + 1
         # Vosk decides only when it hears the utterance end; steady room noise (fan, PC, echo) can
-        # hide that end for up to ~20 s, so "Jarvis, abre Chrome" sat unanswered and came out with
-        # the next "Jarvis". Once the user has been quiet ~0.8 s, it decides on what it has.
+        # hide that end for up to ~20 s, so "Atlas, abre Chrome" sat unanswered and came out with
+        # the next "Atlas". Once the user has been quiet ~0.8 s, it decides on what it has.
         if fired is None and self.finish and self.spoke >= 4 and self.quiet >= END_SILENCE:
             fired = self.finish()
         if fired is None:
@@ -124,16 +125,21 @@ def make_gate(cfg: dict, log=print):
     """WakeGate from api_keys.json, or None (always listening) with the reason logged."""
     mode = cfg.get("wake_word", "auto")
     if mode is False or str(mode).lower() in ("false", "off", "0"):
-        log("SYS: Wake word off (wake_word=false); always listening.")
+        log("SIS: Palabra de activación apagada (wake_word=false); siempre escuchando.")
         return None
     path = Path(cfg.get("wake_model") or DEFAULT_MODEL)
     path = path if path.is_absolute() else BASE_DIR / path
+    global END_SILENCE
+    try:   # seconds -> 1024-sample chunks at 16 kHz; read before the detector starts using it
+        END_SILENCE = max(1, round(float(cfg.get("wake_end_silence", 2.0)) * RATE / 1024))
+    except (TypeError, ValueError):
+        pass
     try:
         if not path.is_dir():
             raise FileNotFoundError(f"Vosk model not found at {path}")
         det = Detector(path, cfg.get("wake_variants") or VARIANTS, cfg.get("wake_sensitivity", 0.5))
     except Exception as e:   # vosk missing, model missing or broken
-        log(f"SYS: Wake word unavailable ({e}); always listening.")
+        log(f"SIS: Palabra de activación no disponible ({e}); siempre escuchando.")
         return None
-    log("SYS: Wake word on. Say 'Jarvis'.")
+    log("SIS: Palabra de activación lista. Di 'Atlas'.")
     return WakeGate(det.feed, cfg.get("wake_window", 12), finish=det.finish)

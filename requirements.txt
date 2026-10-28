@@ -19,6 +19,7 @@ win10toast; sys_platform == "win32"
 send2trash
 youtube-transcript-api
 pywinauto; sys_platform == "win32"
+uiautomation; sys_platform == "win32"
 PyQt6
 pdfplumber
 PyPDF2

@@ -42,7 +42,7 @@ class WakeGateTests(unittest.TestCase):
         chunk = b"\x00" * (wakeword.RATE // 2 * 2)   # 0.5 s of 16-bit audio
         gate = wakeword.WakeGate(detector([None, None, None, 1.6]), clock=FakeClock())
         out = [gate.feed(c) for c in (b"A" + chunk[1:], b"B" + chunk[1:], b"C" + chunk[1:], b"D" + chunk[1:])]
-        # "abre Chrome" (0-1 s) was said before "Jarvis" (1.6 s): only its pre-roll on goes out
+        # "abre Chrome" (0-1 s) was said before "Atlas" (1.6 s): only its pre-roll on goes out
         self.assertEqual([c[:1] for c in out[-1]], [b"C", b"D"])
 
     def test_decides_when_the_user_stops_even_if_vosk_never_hears_the_end(self):
@@ -55,7 +55,7 @@ class WakeGateTests(unittest.TestCase):
         self.assertEqual(finished, [])   # a short pause is not the end
         out = gate.feed(b"quiet", voiced=False)
         self.assertEqual(finished, [1])
-        self.assertEqual(out[:5], [b"speech"] * 5)   # "Jarvis, abre Chrome" goes out now, not at the next wake word
+        self.assertEqual(out[:5], [b"speech"] * 5)   # "Atlas, abre Chrome" goes out now, not at the next wake word
         self.assertTrue(gate.awake())
 
     def test_window_runs_from_the_users_last_word(self):
@@ -82,12 +82,12 @@ class WakeGateTests(unittest.TestCase):
 class DetectorMatchTests(unittest.TestCase):
     def det(self, sensitivity):
         d = wakeword.Detector.__new__(wakeword.Detector)   # no vosk model needed for match()
-        d.variants = [["jarvis"], ["har", "bis"]]
+        d.variants = [["atlas"], ["har", "bis"]]
         d.min_conf = 1.0 - sensitivity
         return d
 
     def test_match_needs_confidence(self):
-        words = [{"word": "[unk]", "conf": 1.0}, {"word": "jarvis", "conf": 0.6}]
+        words = [{"word": "[unk]", "conf": 1.0}, {"word": "atlas", "conf": 0.6}]
         self.assertTrue(self.det(0.5).match(words))    # needs >= 0.5
         self.assertFalse(self.det(0.2).match(words))   # needs >= 0.8
 
@@ -104,7 +104,19 @@ class MakeGateTests(unittest.TestCase):
     def test_missing_model_falls_back_to_always_listening(self):
         logs = []
         self.assertIsNone(wakeword.make_gate({"wake_model": "no/such/model"}, log=logs.append))
-        self.assertIn("unavailable", logs[0])
+        self.assertIn("no disponible", logs[0])
+
+
+class EndSilenceTests(unittest.TestCase):
+    def test_wake_end_silence_setting_is_applied(self):   # seconds -> 1024-sample chunks at 16 kHz
+        old = wakeword.END_SILENCE
+        try:
+            wakeword.make_gate({"wake_end_silence": 1.0, "wake_model": "no/such/model"}, log=lambda *_: None)
+            self.assertEqual(wakeword.END_SILENCE, 16)
+            wakeword.make_gate({"wake_end_silence": "slow", "wake_model": "no/such/model"}, log=lambda *_: None)
+            self.assertEqual(wakeword.END_SILENCE, 16)   # bad value: unchanged
+        finally:
+            wakeword.END_SILENCE = old
 
 
 if __name__ == "__main__":

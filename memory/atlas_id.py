@@ -1,11 +1,11 @@
 """
-JARVIS ID: optional Google sign-in through Supabase Auth, so several devices share one memory.
-JARVIS works the same without it and it never changes the selected AI engine.
+ATLAS ID: optional Google sign-in through Supabase Auth, so several devices share one memory.
+ATLAS works the same without it and it never changes the selected AI engine.
 
-JARVIS ships with its own project's public URL and publishable key (row level security on the
+ATLAS ships with its own project's public URL and publishable key (row level security on the
 server guards the data), so a user only signs in; supabase_url / supabase_anon_key in
 api_keys.json point to another project. The session tokens are kept encrypted for this Windows
-user (DPAPI) and never logged. Setup: docs/jarvis-id-setup.md.
+user (DPAPI) and never logged. Setup: docs/atlas-id-setup.md.
 """
 import base64
 import hashlib
@@ -25,17 +25,20 @@ import requests
 
 from config import VERSION, get_config, is_windows, update_config
 
-SESSION_FILE = Path(__file__).resolve().parent / "jarvis_id.session"
+SESSION_FILE = Path(__file__).resolve().parent / "atlas_id.session"
+_OLD_SESSION = SESSION_FILE.with_name("jarvis_id.session")   # name before 2.5.0: keep the user signed in
+if _OLD_SESSION.exists() and not SESSION_FILE.exists():
+    _OLD_SESSION.rename(SESSION_FILE)
 PORT     = 53682   # Google sends the browser back here; Supabase must allow http://127.0.0.1:53682/callback
 REDIRECT = f"http://127.0.0.1:{PORT}/callback"
 TIMEOUT  = 15
-# JARVIS's Supabase project. Public by design: never put the secret / service_role key here.
+# ATLAS's Supabase project. Public by design: never put the secret / service_role key here.
 PROJECT_URL = "https://bevrstsvfikouhacidic.supabase.co"
 PUBLIC_KEY  = "sb_publishable_yhc161xS2QOWqAwYMaRKsA_iQwS2K1C"
 
 
 class IDError(RuntimeError):
-    """JARVIS ID not configured, not signed in, offline or refused by the server (status: its HTTP code)."""
+    """ATLAS ID not configured, not signed in, offline or refused by the server (status: its HTTP code)."""
     status = 0
 
 
@@ -47,7 +50,7 @@ def _project() -> tuple[str, str]:
     url = (cfg.get("supabase_url") or PROJECT_URL).strip().rstrip("/")
     key = (cfg.get("supabase_anon_key") or PUBLIC_KEY).strip()
     if not url or not key:
-        raise IDError("JARVIS ID is not set up: supabase_url / supabase_anon_key are empty (docs/jarvis-id-setup.md)")
+        raise IDError("ATLAS ID is not set up: supabase_url / supabase_anon_key are empty (docs/atlas-id-setup.md)")
     return url, key
 
 
@@ -69,9 +72,9 @@ def device_id() -> str:
 
 def device_name() -> str:
     try:
-        return (get_config().get("device_name") or "").strip() or platform.node() or "JARVIS"
+        return (get_config().get("device_name") or "").strip() or platform.node() or "ATLAS"
     except Exception:
-        return platform.node() or "JARVIS"
+        return platform.node() or "ATLAS"
 
 
 # ── Session storage ───────────────────────────────────────────────────────────
@@ -134,7 +137,7 @@ def _token(grant: str, body: dict) -> dict:
     r = requests.post(f"{url}/auth/v1/token", params={"grant_type": grant}, json=body,
                       headers={"apikey": key}, timeout=TIMEOUT)
     if r.status_code != 200:
-        raise IDError(f"JARVIS ID sign-in refused ({grant}): HTTP {r.status_code} {_reason(r)}")
+        raise IDError(f"ATLAS ID sign-in refused ({grant}): HTTP {r.status_code} {_reason(r)}")
     d = r.json()
     s = {"access_token": d["access_token"], "refresh_token": d["refresh_token"],
          "expires_at": time.time() + int(d.get("expires_in") or 3600),
@@ -144,11 +147,11 @@ def _token(grant: str, body: dict) -> dict:
 
 
 def _page(ok: bool, detail: str) -> bytes:
-    """The tab the browser lands on after Google, in the JARVIS HUD colours. detail: email or error."""
+    """The tab the browser lands on after Google, in the ATLAS HUD colours. detail: email or error."""
     color, title = ("#6ff3ff", "SIGNED IN") if ok else ("#ff2a3d", "SIGN-IN FAILED")
     detail = html.escape(detail or "")
-    msg = f"{detail}<br>You can close this tab and go back to JARVIS." if ok else detail
-    return f"""<!doctype html><html><head><meta charset="utf-8"><title>JARVIS ID</title>
+    msg = f"{detail}<br>You can close this tab and go back to ATLAS." if ok else detail
+    return f"""<!doctype html><html><head><meta charset="utf-8"><title>ATLAS ID</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"><style>
 body{{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 50% 40%,#0d1a20,#05070b 70%);
 color:#ffe2a6;font-family:Bahnschrift,"Segoe UI",sans-serif;text-align:center}}
@@ -157,7 +160,7 @@ box-shadow:0 0 30px {color}88,inset 0 0 24px {color}55;display:grid;place-items:
 .brand{{color:#ffb627;letter-spacing:.5em;font-size:13px}}h1{{margin:10px 0;letter-spacing:.2em;font-weight:600;color:{color}}}
 p{{color:#c19a5b;max-width:420px;margin:0 auto;padding:0 16px;line-height:1.5}}
 </style></head><body><main><div class="ring">{"&#10003;" if ok else "!"}</div>
-<div class="brand">JARVIS ID</div><h1>{title}</h1><p>{msg}</p></main></body></html>""".encode()
+<div class="brand">ATLAS ID</div><h1>{title}</h1><p>{msg}</p></main></body></html>""".encode()
 
 
 def login(timeout: int = 300, open_browser=webbrowser.open) -> dict:
@@ -180,7 +183,7 @@ def login(timeout: int = 300, open_browser=webbrowser.open) -> dict:
                 try:
                     got["session"] = _token("pkce", {"auth_code": code, "code_verifier": verifier})
                 except (IDError, requests.RequestException) as e:
-                    error = str(e) if isinstance(e, IDError) else f"JARVIS ID offline ({type(e).__name__})"
+                    error = str(e) if isinstance(e, IDError) else f"ATLAS ID offline ({type(e).__name__})"
             got["error"] = "" if "session" in got else error or "no code in the reply"
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -217,16 +220,16 @@ def access_token() -> str:
     a network failure keeps the session for the next try."""
     s = _load_session()
     if not s:
-        raise IDError("Not signed in to JARVIS ID")
+        raise IDError("Not signed in to ATLAS ID")
     if s["expires_at"] - time.time() > 60:
         return s["access_token"]
     try:
         return _token("refresh_token", {"refresh_token": s["refresh_token"]})["access_token"]
     except requests.RequestException as e:
-        raise IDError(f"JARVIS ID offline ({type(e).__name__})")
+        raise IDError(f"ATLAS ID offline ({type(e).__name__})")
     except IDError:
         _save_session(None)
-        raise IDError("JARVIS ID session expired: sign in again")
+        raise IDError("ATLAS ID session expired: sign in again")
 
 
 def logout() -> None:
@@ -254,9 +257,9 @@ def rest(method: str, path: str, **kw):
     try:
         r = requests.request(method, f"{url}/rest/v1/{path}", headers=headers, timeout=TIMEOUT, **kw)
     except requests.RequestException as e:
-        raise IDError(f"JARVIS ID offline ({type(e).__name__})")
+        raise IDError(f"ATLAS ID offline ({type(e).__name__})")
     if r.status_code >= 400:
-        err = IDError(f"JARVIS ID {method} {path.split('?')[0]}: HTTP {r.status_code} {_reason(r)}")
+        err = IDError(f"ATLAS ID {method} {path.split('?')[0]}: HTTP {r.status_code} {_reason(r)}")
         err.status = r.status_code
         raise err
     return r.json() if r.content else None

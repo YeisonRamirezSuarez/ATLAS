@@ -196,7 +196,7 @@ def brightness_down(): return _brightness(delta=-10)
 def brightness_set(value: int): return _brightness(absolute=max(0, min(100, int(value))))
 
 def _own_pids() -> set[int]:
-    """JARVIS itself and the launcher that started it: never closed by close_app."""
+    """ATLAS itself and the launcher that started it: never closed by close_app."""
     import os
     pids = {os.getpid()}
     try:
@@ -214,8 +214,8 @@ def _window_pid(hwnd) -> int:
     return pid.value
 
 
-def away_from_jarvis() -> bool:
-    """Keyboard actions go to the focused window. When that is JARVIS's own (the user just typed
+def away_from_atlas() -> bool:
+    """Keyboard actions go to the focused window. When that is ATLAS's own (the user just typed
     or talked to it), focus the window behind it first. False when there is no other window."""
     if _OS != "Windows":
         return True
@@ -245,10 +245,10 @@ def _matches(app: str, proc: str) -> bool:
 
 def close_app(app: str = "") -> str:
     """Closes the named app the way its X button does (it may ask to save), or the focused
-    window when no name is given. Never JARVIS itself: that is shutdown_jarvis."""
+    window when no name is given. Never ATLAS itself: that is shutdown_atlas."""
     app = str(app or "").strip()
-    if app and re.sub(r"[^a-z]", "", app.lower()) == "jarvis":
-        return "Not closed: that is JARVIS itself. Use shutdown_jarvis only if the user wants JARVIS to stop."
+    if app and re.sub(r"[^a-z]", "", app.lower()) == "atlas":
+        return "Not closed: that is ATLAS itself. Use shutdown_atlas only if the user wants ATLAS to stop."
     if app and _OS == "Windows":
         import psutil
         own = _own_pids()
@@ -271,8 +271,8 @@ def close_app(app: str = "") -> str:
     if app and _OS == "Darwin":
         r = subprocess.run(["osascript", "-e", f'quit app "{app}"'], capture_output=True, text=True)
         return f"Closed {app}." if r.returncode == 0 else f"Could not close {app}: {r.stderr.strip()[:200]}"
-    if not away_from_jarvis():
-        return "Not closed: the only window in front is JARVIS itself. Ask which app to close."
+    if not away_from_atlas():
+        return "Not closed: the only window in front is ATLAS itself. Ask which app to close."
     if _OS == "Darwin": pyautogui.hotkey("command", "q")
     else:               pyautogui.hotkey("alt", "f4")
     return "Sent close to the focused window; effect not verified."
@@ -791,8 +791,8 @@ def computer_settings(
                 f"Please confirm by calling again with confirmed=yes."
             )
 
-    if action not in _NO_FOCUS and action != "close_app" and not away_from_jarvis():
-        return f"Not done: the only window in front is JARVIS itself, so {action} would hit JARVIS."
+    if action not in _NO_FOCUS and action != "close_app" and not away_from_atlas():
+        return f"Not done: the only window in front is ATLAS itself, so {action} would hit ATLAS."
 
     if action in ("volume_set", "brightness_set"):
         if value is None or not str(value).strip("% ").isdigit():

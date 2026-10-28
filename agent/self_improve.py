@@ -1,5 +1,5 @@
 """
-JARVIS improving its own code, only when the user asks for it: a new ability it lacks or a fix
+ATLAS improving its own code, only when the user asks for it: a new ability it lacks or a fix
 to one it has, without waiting for a release.
 
 Each change: snapshot of the code -> Claude Code edits it with real tools (read, edit, run the
@@ -18,16 +18,23 @@ from pathlib import Path
 BASE  = Path(__file__).resolve().parent.parent
 SNAPS = BASE / "backups" / "code"
 KEEP  = 10   # newest snapshots kept
-# Bundled runtimes and user data, never code JARVIS owns. memory/skills: scripts this PC learned.
+# Bundled runtimes and user data, never code ATLAS owns. memory/skills: scripts this PC learned.
 SKIP  = {"python", "backups", "__pycache__", ".git", ".venv", "skills", "ms-playwright", "models", "bin",
          "dist", "build", "node_modules"}
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
-SYSTEM = """You are improving JARVIS, the Python voice assistant whose install folder is your working
+SYSTEM = """You are improving ATLAS, the Python voice assistant whose install folder is your working
 directory, at its user's request. Make exactly the change asked for, completely, and nothing else.
 - Read the code first. Tools: declaration in TOOL_DECLARATIONS and a branch in _dispatch_tool (main.py),
   the work in a module under actions/. Behavior rules: core/prompt.txt. Match the surrounding style.
 - Never touch config/api_keys.json, memory/long_term.json, memory/skills/, python/ or backups/.
+- Atlas.exe is only a small launcher for atlas.pyw: code and qml changes apply when ATLAS restarts.
+  "Recompile/rebuild Atlas.exe" means, in this folder: C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe
+  -nologo -target:winexe -win32icon:atlas.ico -r:System.Windows.Forms.dll -out:Atlas.exe launcher.cs
+  Never build ATLAS with PyInstaller or any bundler, never write into dist/: such an exe has no qml/
+  and the HUD breaks. Installers come from installer/build.py, which the user runs.
+- Never stop, kill or relaunch ATLAS (atlas.pyw, pythonw, Atlas.exe), even if the request asks: you run
+  inside it, so you would die with it before finishing. ATLAS restarts itself once you are done.
 - Never remove or weaken safety: confirmations, trusted cases, prompt-injection guards, honesty rules.
 - Install a package only when indispensable: {python} -m pip install <name>.
 - Add or adjust a test in tests/ when practical, run `{python} -m unittest discover -s tests` and fix
@@ -36,7 +43,7 @@ directory, at its user's request. Make exactly the change asked for, completely,
 
 
 def _python() -> str:
-    """Console interpreter next to the running one (JARVIS itself may run under pythonw)."""
+    """Console interpreter next to the running one (ATLAS itself may run under pythonw)."""
     exe = Path(sys.executable)
     con = exe.with_name("python.exe")
     return str(con if exe.name.lower() == "pythonw.exe" and con.exists() else exe)
@@ -95,11 +102,12 @@ def _model() -> tuple[str, dict]:
 
 async def _agent_once(request: str) -> tuple[str, bool]:
     from claude_agent_sdk import ResultMessage, query
-    from agent.llm import is_auth_error, subscription_options
+    from agent.llm import SKILL_SOURCES, is_auth_error, subscription_options
     model, env = _model()
     opts = subscription_options(SYSTEM.replace("{python}", _python()), model, persist=True, cwd=str(BASE), max_turns=80,
-                                tools=["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
-                                allowed_tools=["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
+                                tools=["Read", "Edit", "Write", "Glob", "Grep", "Bash", "Skill"],
+                                allowed_tools=["Read", "Edit", "Write", "Glob", "Grep", "Bash", "Skill"],
+                                setting_sources=SKILL_SOURCES,
                                 permission_mode="bypassPermissions")
     opts.env.update(env)
     out = ("", False)

@@ -8,16 +8,16 @@
 
 [Setup]
 AppId=J.A.R.V.I.S
-AppName=JARVIS
+AppName=ATLAS
 AppVersion={#AppVer}
-AppPublisher=JARVIS
-DefaultDirName={localappdata}\Programs\Jarvis
+AppPublisher=ATLAS
+DefaultDirName={localappdata}\Programs\Atlas
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
 OutputDir=..\dist
-OutputBaseFilename=Jarvis-Setup
-SetupIconFile=..\jarvis.ico
-UninstallDisplayIcon={app}\app\jarvis.ico
+OutputBaseFilename=Atlas-Setup
+SetupIconFile=..\atlas.ico
+UninstallDisplayIcon={app}\app\atlas.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -26,14 +26,23 @@ WizardStyle=modern
 Name: desktopicon; Description: "Create a desktop shortcut"
 
 [Files]
-Source: "..\dist\Jarvis\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion createallsubdirs
+Source: "..\dist\Atlas\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion createallsubdirs
+
+; Upgrading from JARVIS (before 2.5.0): drop its launcher, entry point and shortcuts.
+[InstallDelete]
+Type: files; Name: "{app}\Jarvis.exe"
+Type: files; Name: "{app}\app\jarvis.pyw"
+Type: files; Name: "{app}\app\jarvis.ico"
+Type: files; Name: "{app}\app\memory\jarvis_id.py"
+Type: files; Name: "{userprograms}\JARVIS.lnk"
+Type: files; Name: "{userdesktop}\JARVIS.lnk"
 
 [Icons]
-Name: "{userprograms}\JARVIS"; Filename: "{app}\Jarvis.exe"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\jarvis.ico"
-Name: "{userdesktop}\JARVIS"; Filename: "{app}\Jarvis.exe"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\jarvis.ico"; Tasks: desktopicon
+Name: "{userprograms}\ATLAS"; Filename: "{app}\Atlas.exe"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\atlas.ico"; AppUserModelID: "Atlas.Assistant"
+Name: "{userdesktop}\ATLAS"; Filename: "{app}\Atlas.exe"; WorkingDir: "{app}\app"; IconFilename: "{app}\app\atlas.ico"; AppUserModelID: "Atlas.Assistant"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\Jarvis.exe"; WorkingDir: "{app}\app"; Description: "Launch JARVIS"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Atlas.exe"; WorkingDir: "{app}\app"; Description: "Launch ATLAS"; Flags: nowait postinstall skipifsilent
 
 ; No [UninstallDelete] for {app}: files the installer copied go away by themselves; the user's
 ; data (keys, memory, backups) is deleted only when they tick the box below.
@@ -57,7 +66,7 @@ begin
     Exit;
   Form := CreateCustomForm(ScaleX(400), ScaleY(120), False, True);
   try
-    Form.Caption := 'Uninstall JARVIS';
+    Form.Caption := 'Uninstall ATLAS';
 
     Info := TNewStaticText.Create(Form);
     Info.Parent := Form;
@@ -67,7 +76,7 @@ begin
     Info.Top := ScaleY(10);
     Info.Width := Form.ClientWidth - ScaleX(20);
     Info.Height := ScaleY(30);
-    Info.Caption := 'JARVIS will be removed. Your API keys, memory and backups are kept unless you tick the box.';
+    Info.Caption := 'ATLAS will be removed. Your API keys, memory and backups are kept unless you tick the box.';
 
     Check := TNewCheckBox.Create(Form);
     Check.Parent := Form;

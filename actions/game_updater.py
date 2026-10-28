@@ -691,7 +691,7 @@ def _update_epic_games(epic_path: Path, game_name: str = None) -> str:
 
 
 def _schedule_daily_update(hour: int = 3, minute: int = 0) -> str:
-    task_name   = "JARVIS_GameUpdater"
+    task_name   = "ATLAS_GameUpdater"
     script_path = Path(__file__).resolve()
     subprocess.run(["schtasks", "/Delete", "/TN", task_name, "/F"], capture_output=True)
     for extra in (["/RL", "HIGHEST", "/RU", "SYSTEM"], []):
@@ -705,13 +705,14 @@ def _schedule_daily_update(hour: int = 3, minute: int = 0) -> str:
 
 
 def _cancel_scheduled_update() -> str:
-    result = subprocess.run(["schtasks", "/Delete", "/TN", "JARVIS_GameUpdater", "/F"],
+    subprocess.run(["schtasks", "/Delete", "/TN", "JARVIS_GameUpdater", "/F"], capture_output=True)   # before 2.5.0
+    result = subprocess.run(["schtasks", "/Delete", "/TN", "ATLAS_GameUpdater", "/F"],
                             capture_output=True, text=True)
     return "Scheduled update cancelled." if result.returncode == 0 else "No scheduled update found."
 
 
 def _get_schedule_status() -> str:
-    result = subprocess.run(["schtasks", "/Query", "/TN", "JARVIS_GameUpdater", "/FO", "LIST"],
+    result = subprocess.run(["schtasks", "/Query", "/TN", "ATLAS_GameUpdater", "/FO", "LIST"],
                             capture_output=True, text=True)
     if result.returncode != 0:
         return "No scheduled game update found."

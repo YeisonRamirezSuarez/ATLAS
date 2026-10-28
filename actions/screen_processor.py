@@ -12,7 +12,6 @@ import concurrent.futures
 import cv2
 import mss
 import mss.tools
-import sounddevice as sd
 import numpy as np
 from pathlib import Path
 
@@ -34,10 +33,6 @@ BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
-CHANNELS            = 1
-RECEIVE_SAMPLE_RATE = 24000
-CHUNK_SIZE          = 1024
-
 IMG_MAX_W = 640
 IMG_MAX_H = 360
 JPEG_Q    = 55
@@ -49,13 +44,12 @@ ANSWER_TIMEOUT = 30   # seconds to wait for one vision answer
 _CAP_API = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
 
 SYSTEM_PROMPT = (
-    "You are JARVIS from Iron Man movies. "
+    "You are ATLAS, a sharp personal AI assistant. "
     "Analyze images with technical precision and intelligence. "
     "Help the user in a way they can understand — don't be overly complex. "
-    "Be concise, smart, and helpful like Tony Stark's AI assistant. "
+    "Be concise, smart, and helpful. "
     "Respond in maximum 2 short sentences. Speed is priority. "
-    "Address the user as 'sir' for a tone of respect. "
-    "Ask if the user needs any further help with their problem."
+    "Your answer is read by ATLAS, who tells the user in his own voice."
 )
 
 
@@ -124,11 +118,51 @@ def _to_jpeg(img_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
-def _capture_screenshot() -> bytes:
+def _monitor_labels(monitors: list[dict]) -> list[str]:
+    """Names each monitor by where it sits, left to right ("left", "center", "right").
+    The primary one (at 0,0) is marked so the user can tell which is which."""
+    order = sorted(range(len(monitors)), key=lambda i: (monitors[i]["left"], monitors[i]["top"]))
+    n = len(monitors)
+    if n == 1:
+        names = ["main screen"]
+    elif n == 2:
+        names = ["left screen", "right screen"]
+    elif n == 3:
+        names = ["left screen", "center screen", "right screen"]
+    else:
+        names = [f"screen {k + 1} from the left" for k in range(n)]
+    labels = [""] * n
+    for pos, i in enumerate(order):
+        m = monitors[i]
+        label = f"{names[pos]} ({m['width']}x{m['height']}"
+        if n > 1 and m["left"] == 0 and m["top"] == 0:
+            label += ", primary"
+        labels[i] = label + ")"
+    return [labels[i] for i in order]
+
+
+def _capture_screenshot() -> list[tuple[str, bytes]]:
+    """Captures every monitor separately: [(label, image bytes), ...] ordered left to right."""
     with mss.mss() as sct:
-        shot      = sct.grab(sct.monitors[1])
-        png_bytes = mss.tools.to_png(shot.rgb, shot.size)
-    return _to_jpeg(png_bytes)
+        monitors = sorted(sct.monitors[1:] or sct.monitors[:1],
+                          key=lambda m: (m["left"], m["top"]))
+        labels   = _monitor_labels(monitors)
+        shots    = []
+        for label, mon in zip(labels, monitors):
+            shot = sct.grab(mon)
+            shots.append((label, _to_jpeg(mss.tools.to_png(shot.rgb, shot.size))))
+    return shots
+
+
+def _screens_question(labels: list[str], user_text: str) -> str:
+    if len(labels) <= 1:
+        return user_text
+    return (
+        f"The user has {len(labels)} monitors; you got one image per monitor, each preceded "
+        f"by its label: {', '.join(labels)}. Look at ALL of them before answering, say which "
+        "screen each thing you mention is on, and only say something is not visible if it "
+        f"is on none of them. Question: {user_text}"
+    )
 
 
 def _capture_camera() -> bytes:
@@ -162,15 +196,11 @@ class _LiveSession:
         self._thread:    threading.Thread | None          = None
         self._session                                     = None
         self._out_queue: asyncio.Queue | None             = None
-        self._audio_in:  asyncio.Queue | None             = None
         self._ready:     threading.Event                  = threading.Event()
-        self._player                                      = None
         # One Future per sent request, answered in order by _recv_loop.
         self._waiting: collections.deque                  = collections.deque()
 
-    def start(self, player=None):
-        if player is not None:
-            self._player = player
+    def start(self):
         if not (self._thread and self._thread.is_alive()):
             self._thread = threading.Thread(
                 target=self._run_loop, daemon=True, name="VisionSessionThread"
@@ -186,7 +216,6 @@ class _LiveSession:
 
     async def _main(self):
         self._out_queue = asyncio.Queue(maxsize=30)
-        self._audio_in  = asyncio.Queue()
 
         client = genai.Client(
             api_key=_get_api_key(),
@@ -216,7 +245,6 @@ class _LiveSession:
                     async with asyncio.TaskGroup() as tg:
                         tg.create_task(self._send_loop())
                         tg.create_task(self._recv_loop())
-                        tg.create_task(self._play_loop())
             except Exception as e:
                 print(f"[ScreenProcess] ⚠️ Disconnected: {e} — reconnecting...")
                 self._session = None
@@ -234,17 +262,19 @@ class _LiveSession:
             # Queue before sending so the answer can never arrive first.
             self._waiting.append(fut)
             try:
-                b64 = base64.b64encode(image_bytes).decode("utf-8")
+                images = image_bytes if isinstance(image_bytes, list) else [("", image_bytes)]
+                parts  = []
+                for label, data in images:
+                    if label:
+                        parts.append({"text": f"Image of the {label}:"})
+                    b64 = base64.b64encode(data).decode("utf-8")
+                    parts.append({"inline_data": {"mime_type": mime_type, "data": b64}})
+                parts.append({"text": user_text})
                 await self._session.send_client_content(
-                    turns={
-                        "parts": [
-                            {"inline_data": {"mime_type": mime_type, "data": b64}},
-                            {"text": user_text}
-                        ]
-                    },
+                    turns={"parts": parts},
                     turn_complete=True
                 )
-                print("[ScreenProcess] ✅ Image sent")
+                print(f"[ScreenProcess] ✅ {len(images)} image(s) sent")
             except Exception as e:
                 print(f"[ScreenProcess] ⚠️ Send error: {e}")
                 self._waiting.remove(fut)
@@ -258,9 +288,7 @@ class _LiveSession:
             chunks: list[str] = []
             got_any = False
             async for response in self._session.receive():
-                got_any = True
-                if response.data:
-                    await self._audio_in.put(response.data)
+                got_any = True   # its audio is never played: ATLAS says the answer in his one voice
                 sc = response.server_content
                 if not sc:
                     continue
@@ -275,35 +303,15 @@ class _LiveSession:
             full = re.sub(r'\s+', ' ', " ".join(chunks)).strip()
             if full:
                 print(f"[ScreenProcess] 💬 {full}")
-                if self._player:
-                    self._player.write_log(f"Jarvis: {full}")
             if self._waiting:
                 fut = self._waiting.popleft()
                 if not fut.done():
                     fut.set_result(full)
 
-    async def _play_loop(self):
-        stream = sd.RawOutputStream(
-            samplerate=RECEIVE_SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="int16",
-            blocksize=CHUNK_SIZE,
-        )
-        stream.start()
-        try:
-            while True:
-                chunk = await self._audio_in.get()
-                await asyncio.to_thread(stream.write, chunk)
-        except Exception as e:
-            print(f"[ScreenProcess] ❌ Play error: {e}")
-            raise
-        finally:
-            stream.stop()
-            stream.close()
-
-    def analyze(self, image_bytes: bytes, mime_type: str, user_text: str,
+    def analyze(self, image_bytes: bytes | list[tuple[str, bytes]], mime_type: str, user_text: str,
                 timeout: float = ANSWER_TIMEOUT) -> str:
-        """Sends the image and returns the answer text ("" if only audio came back).
+        """Sends the image, or labeled images [(label, bytes), ...], and returns the answer
+        text ("" if only audio came back).
         Raises TimeoutError when no answer arrives in time."""
         if not self._loop or not self.is_ready():
             raise ConnectionError("vision session is not connected")
@@ -322,9 +330,9 @@ _live       = _LiveSession()
 _start_lock = threading.Lock()
 
 
-def _ensure_started(player=None):
+def _ensure_started():
     with _start_lock:
-        _live.start(player=player)
+        _live.start()
 
 
 def screen_process(
@@ -352,16 +360,21 @@ def screen_process(
             mime_type   = "image/jpeg"
             print("[ScreenProcess] 📷 Camera captured")
         else:
-            image_bytes = _capture_screenshot()
+            screens     = _capture_screenshot()
+            if not screens:
+                raise RuntimeError("no monitor found")
+            image_bytes = screens if len(screens) > 1 else screens[0][1]
+            user_text   = _screens_question([label for label, _ in screens], user_text)
             mime_type   = "image/jpeg" if _PIL_OK else "image/png"
-            print("[ScreenProcess] 🖥️ Screen captured")
+            print(f"[ScreenProcess] 🖥️ {len(screens)} screen(s) captured")
     except Exception as e:
         print(f"[ScreenProcess] ❌ Capture error: {e}")
         return f"Could not capture the {angle}: {e}"
 
-    print(f"[ScreenProcess] 📦 {len(image_bytes)} bytes → sending")
+    size = sum(len(b) for _, b in image_bytes) if isinstance(image_bytes, list) else len(image_bytes)
+    print(f"[ScreenProcess] 📦 {size} bytes → sending")
     try:
-        _ensure_started(player=player)
+        _ensure_started()
         text = _live.analyze(image_bytes, mime_type, user_text)
     except TimeoutError:
         return f"Failed: the vision model did not answer within {ANSWER_TIMEOUT}s."
@@ -376,7 +389,7 @@ def screen_process(
 
 def warmup_session(player=None):
     try:
-        _ensure_started(player=player)
+        _ensure_started()
     except Exception as e:
         print(f"[ScreenProcess] ⚠️ Warmup error: {e}")
 
@@ -394,4 +407,3 @@ if __name__ == "__main__":
     t1     = time.perf_counter()
     result = screen_process({"angle": mode, "text": request}, player=None)
     print(f"Done — {time.perf_counter()-t1:.3f}s | {result}")
-    time.sleep(3)  # let the last audio chunks play

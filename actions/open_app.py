@@ -1,5 +1,5 @@
 # actions/open_app.py
-# JARVIS — Cross-Platform App Launcher
+# ATLAS — Cross-Platform App Launcher
 
 import os
 import time

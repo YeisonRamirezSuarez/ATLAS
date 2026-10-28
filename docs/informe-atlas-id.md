@@ -1,6 +1,6 @@
-# Informe final: JARVIS ID y memoria compartida
+# Informe final: ATLAS ID y memoria compartida
 
-> Informe de la implementación de JARVIS ID, publicada en la versión 2.4.0. Guía de uso: [jarvis-id-setup.md](jarvis-id-setup.md).
+> Informe de la implementación de ATLAS ID, publicada en la versión 2.4.0. Guía de uso: [atlas-id-setup.md](atlas-id-setup.md).
 
 Fecha: 2026-10-26 · Base: commit `8f51efd` (v2.3.1).
 
@@ -22,7 +22,7 @@ El resto está implementado y probado sin red.
 
 ## 1. Qué se encontró en la auditoría
 
-El detalle está en `docs/auditoria-jarvis-id.md`. Resumen:
+El detalle está en `docs/auditoria-atlas-id.md`. Resumen:
 
 - **Fallos silenciosos de Engram.** Antes, un error de Engram se mostraba como "no hay recuerdos" y un guardado fallido no se notaba.
 - **Origen de los chats acumulados.** Cada llamada auxiliar del motor `claude_sub` arrancaba Claude Code, y Claude Code guardaba una sesión nueva en disco.
@@ -35,9 +35,9 @@ El detalle está en `docs/auditoria-jarvis-id.md`. Resumen:
 | Componente | Uso |
 |---|---|
 | `memory_manager.update_memory` / `forget` | Único punto de escritura de la memoria. La sincronización se engancha ahí. |
-| `config/api_keys.json` y `get_config()` | Guardan la configuración de JARVIS ID. Se añadió `update_config()` para escrituras parciales atómicas. |
+| `config/api_keys.json` y `get_config()` | Guardan la configuración de ATLAS ID. Se añadió `update_config()` para escrituras parciales atómicas. |
 | `SettingsOverlay` (`_lbl`, `_field`, estilo de botones) | Construyen la nueva pestaña. |
-| `JarvisUI.write_log` (líneas `SYS:`) | Muestra el diagnóstico de arranque y los resultados de la sincronización. |
+| `AtlasUI.write_log` (líneas `SYS:`) | Muestra el diagnóstico de arranque y los resultados de la sincronización. |
 | `requests` (ya instalado) | Habla con Supabase Auth (GoTrue) y PostgREST. No se añadió `supabase-py`. |
 | `updater.py backup` / `restore` | Copias de seguridad. Ahora también incluyen `sync.db` y la sesión. |
 | Engram CLI | Sigue siendo la memoria de largo plazo. No se usó ninguna API de Engram que no exista. |
@@ -51,24 +51,24 @@ El detalle está en `docs/auditoria-jarvis-id.md`. Resumen:
 | `memory/memory_manager.py` | Cambios: <ul><li>`_engram` devuelve `None` y el motivo cuando falla.</li><li>`_engram_save` confirma el número del recuerdo guardado.</li><li>`search_memory` dice FAILED en vez de "nada encontrado".</li><li>`diagnose()` hace una prueba real de escritura, lectura y borrado.</li><li>Ganchos de sincronización en `update_memory` y `forget`.</li></ul> |
 | `main.py` | Diagnóstico de arranque en el log. Hilo de sincronización cada 5 minutos. |
 | `config/__init__.py` | `update_config()`: fusiona cambios y escribe de forma atómica. Si el archivo no se puede leer, no lo sobrescribe. |
-| `ui.py` | Ajustes rediseñados con tres pestañas: **GENERAL** (tema claro/oscuro, audio, inicio con el sistema), **AI ENGINE** (proveedor, claves; modelo y URL en *Advanced*) y **ACCOUNT** (JARVIS ID, sincronización, dispositivos, diagnóstico). SAVE & START conserva los valores que guarda ACCOUNT. |
-| `updater.py` | La copia de seguridad incluye `memory/sync.db` y `memory/jarvis_id.session`. |
-| `installer/build.py` | El instalador nunca empaqueta `jarvis_id.session` ni `sync.db`. |
+| `ui.py` | Ajustes rediseñados con tres pestañas: **GENERAL** (tema claro/oscuro, audio, inicio con el sistema), **AI ENGINE** (proveedor, claves; modelo y URL en *Advanced*) y **ACCOUNT** (ATLAS ID, sincronización, dispositivos, diagnóstico). SAVE & START conserva los valores que guarda ACCOUNT. |
+| `updater.py` | La copia de seguridad incluye `memory/sync.db` y `memory/atlas_id.session`. |
+| `installer/build.py` | El instalador nunca empaqueta `atlas_id.session` ni `sync.db`. |
 | `.gitignore` | Excluye la sesión, `sync.db` y los `.tmp` de escritura atómica. |
 | `tests/test_core.py` | 4 pruebas de Engram: fallo visible, guardado y lectura reales en un almacén aislado, y diagnóstico. |
-| `memory/long_term.json` (git-ignored) | Limpieza aprobada por usted: <ul><li>4 hechos de "señor" unidos en 1.</li><li>2 de avisos por voz unidos en 1.</li><li>2 de idioma unidos en 1.</li><li>Temporales quitados.</li><li>`jarvis_env_file` borrado.</li></ul> Copia previa en `backups/20261026-111103-before-memory-cleanup.zip`. |
+| `memory/long_term.json` (git-ignored) | Limpieza aprobada por usted: <ul><li>4 hechos de "señor" unidos en 1.</li><li>2 de avisos por voz unidos en 1.</li><li>2 de idioma unidos en 1.</li><li>Temporales quitados.</li><li>`atlas_env_file` borrado.</li></ul> Copia previa en `backups/20261026-111103-before-memory-cleanup.zip`. |
 
 ## 4. Archivos nuevos
 
 | Archivo | Qué es |
 |---|---|
-| `memory/jarvis_id.py` | Varias funciones: <ul><li>Login con Google por Supabase: OAuth PKCE con retorno a `http://127.0.0.1:53682/callback`.</li><li>Renovación de tokens y cierre de sesión.</li><li>Sesión cifrada con DPAPI.</li><li>Id aleatorio por dispositivo.</li><li>Lista de dispositivos y quitar uno.</li></ul> |
+| `memory/atlas_id.py` | Varias funciones: <ul><li>Login con Google por Supabase: OAuth PKCE con retorno a `http://127.0.0.1:53682/callback`.</li><li>Renovación de tokens y cierre de sesión.</li><li>Sesión cifrada con DPAPI.</li><li>Id aleatorio por dispositivo.</li><li>Lista de dispositivos y quitar uno.</li></ul> |
 | `memory/sync.py` | Sincronización: <ul><li>Cola local sin conexión.</li><li>Envío y recepción de cambios.</li><li>Versiones y conflictos.</li><li>Filtro de secretos.</li><li>`describe()` y `stats()` para la interfaz.</li></ul> |
 | `supabase/migrations/001_jarvis_id.sql` | Tablas `devices` y `memories`. <ul><li>RLS activado y forzado.</li><li>Trigger que rechaza versiones viejas.</li><li>`revoke` a `anon`.</li></ul> |
-| `docs/jarvis-id-setup.md` | Pasos exactos para Supabase y Google. Incluye un ejemplo de configuración sin credenciales. |
-| `docs/auditoria-jarvis-id.md` | Auditoría de la Fase 0 y sus decisiones. |
-| `docs/informe-jarvis-id.md` | Este informe. |
-| `tests/test_jarvis_id.py` | 8 pruebas: proyecto incluido, login PKCE con su página, página de error escapada, cifrado de sesión, renovación, sin conexión, cierre, id de dispositivo y filtro de entradas. |
+| `docs/atlas-id-setup.md` | Pasos exactos para Supabase y Google. Incluye un ejemplo de configuración sin credenciales. |
+| `docs/auditoria-atlas-id.md` | Auditoría de la Fase 0 y sus decisiones. |
+| `docs/informe-atlas-id.md` | Este informe. |
+| `tests/test_atlas_id.py` | 8 pruebas: proyecto incluido, login PKCE con su página, página de error escapada, cifrado de sesión, renovación, sin conexión, cierre, id de dispositivo y filtro de entradas. |
 | `tests/test_sync.py` | 6 pruebas con un servidor PostgREST falso y dos dispositivos. |
 | `tests/test_settings_ui.py` | 1 prueba de la pestaña nueva, en Qt sin pantalla. |
 
@@ -85,20 +85,20 @@ El detalle está en `docs/auditoria-jarvis-id.md`. Resumen:
 **Configurado y verificado.**
 
 - Supabase: proyecto `bevrstsvfikouhacidic`, migración ejecutada, Google activado (`/auth/v1/settings` devuelve `google: true`), Redirect URL `http://127.0.0.1:53682/callback` permitida.
-- Google Cloud: proyecto `jarvis-id-512816`, cliente OAuth web "JARVIS Supabase", redirect URI `https://bevrstsvfikouhacidic.supabase.co/auth/v1/callback`. El Client Secret lo pegó usted, solo en Supabase.
+- Google Cloud: proyecto `jarvis-id-512816`, cliente OAuth web "ATLAS Supabase", redirect URI `https://bevrstsvfikouhacidic.supabase.co/auth/v1/callback`. El Client Secret lo pegó usted, solo en Supabase.
 - La app de Google está en **modo de prueba**: solo entran los usuarios de prueba (hoy `pablo.romero.diaz14@gmail.com`). Para abrirla a todos hay que pulsar **Publish app**.
-- JARVIS trae la URL y la clave publishable en `memory/jarvis_id.py`. El usuario no pega nada: solo inicia sesión.
+- ATLAS trae la URL y la clave publishable en `memory/atlas_id.py`. El usuario no pega nada: solo inicia sesión.
 
-JARVIS nunca tiene el secreto de Google ni la clave `service_role`.
+ATLAS nunca tiene el secreto de Google ni la clave `service_role`.
 
-## 7. Integración de JARVIS ID
+## 7. Integración de ATLAS ID
 
-- **Es opcional.** Sin configurar, el log dice "JARVIS ID: not set up (optional); memory stays on this PC." y todo funciona igual. No cambia el motor de IA.
-- **Login.** El botón abre el navegador. Un servidor local espera el código solo durante el login y no escribe nada en el log. JARVIS cambia el código por tokens con PKCE.
+- **Es opcional.** Sin configurar, el log dice "ATLAS ID: not set up (optional); memory stays on this PC." y todo funciona igual. No cambia el motor de IA.
+- **Login.** El botón abre el navegador. Un servidor local espera el código solo durante el login y no escribe nada en el log. ATLAS cambia el código por tokens con PKCE.
 - **Sesión.**
-  - Se guarda cifrada con DPAPI en `memory/jarvis_id.session`.
+  - Se guarda cifrada con DPAPI en `memory/atlas_id.session`.
   - Si no hay red, la sesión se conserva.
-  - Si el servidor rechaza la renovación, la sesión se borra y JARVIS pide iniciar sesión otra vez.
+  - Si el servidor rechaza la renovación, la sesión se borra y ATLAS pide iniciar sesión otra vez.
 - **Dispositivos.**
   - Cada instalación crea un UUID aleatorio, nunca el nombre del PC.
   - Al iniciar sesión, el dispositivo se registra.
@@ -144,7 +144,7 @@ Engram sigue siendo la memoria de este PC.
 
 **Recepción.**
 
-- JARVIS pide las filas con `updated_at` desde la última recepción, menos 5 minutos de margen.
+- ATLAS pide las filas con `updated_at` desde la última recepción, menos 5 minutos de margen.
 - Ignora las versiones que ya conoce y los datos que esperan en la cola.
 
 **Borrados.** Se envían como `deleted=true` para que los otros dispositivos también los borren.
@@ -159,7 +159,7 @@ Engram sigue siendo la memoria de este PC.
 
 ## 10. Conservación de la memoria local
 
-- `long_term.json` sigue siendo la fuente que lee JARVIS. Funciona igual sin conexión y sin JARVIS ID.
+- `long_term.json` sigue siendo la fuente que lee ATLAS. Funciona igual sin conexión y sin ATLAS ID.
 - Un cambio cuenta como sincronizado solo cuando el servidor lo acepta. Hasta entonces sigue "pending" en la cola.
 - El instalador no toca `sync.db` ni la sesión. `updater.py backup` los incluye.
 
@@ -207,14 +207,14 @@ Diagnóstico real en este PC, con un probe que se borró después:
 Memory file: 10 facts, 1239/2200 chars.
 Engram: engram 3.5.2, 245 memories (1.2 MB), doctor ok.
 Engram write/read/delete: ok (1484 ms).
-JARVIS ID: not set up (optional); memory stays on this PC.
+ATLAS ID: not set up (optional); memory stays on this PC.
 ```
 
 Pruebas de aceptación de la Fase 8:
 
 | # | Prueba | Estado |
 |---|---|---|
-| 1 | Arranca sin JARVIS ID | Probado por módulos: estado "not set up", ajustes, diagnóstico. No se arrancó la app completa. |
+| 1 | Arranca sin ATLAS ID | Probado por módulos: estado "not set up", ajustes, diagnóstico. No se arrancó la app completa. |
 | 2 | Login con Google | Probado contra un servidor falso: flujo PKCE completo. **Login real verificado:** en Supabase quedó 1 usuario y 1 dispositivo (`WPOBUC234`), y la sesión cifrada en este PC. Aún 0 memorias: la sincronización está apagada. |
 | 3 | Errores de autenticación visibles | Probado: sin configurar, renovación rechazada, sin red. |
 | 4 | Identidad por dispositivo | Probado. |
@@ -257,12 +257,12 @@ Pendientes:
 - El límite de 2200 caracteres de `long_term.json` también se aplica a los datos recibidos.
 - En un conflicto gana el servidor de forma automática. La copia local queda guardada, pero no hay botón para restaurarla: hay que hacerlo a mano.
 - Los resúmenes y la depuración automática están pendientes.
-- El login usa el puerto fijo 53682. Si está ocupado, JARVIS lo dice y no inicia sesión.
+- El login usa el puerto fijo 53682. Si está ocupado, ATLAS lo dice y no inicia sesión.
 
 ## 16. Restauración de datos
 
 - **Copia antes de la limpieza de memoria:** `backups/20261026-111103-before-memory-cleanup.zip`.
 - **Copia nueva manual:** `.venv\Scripts\python.exe updater.py backup`
 - **Restaurar una copia:** `.venv\Scripts\python.exe updater.py restore backups\<archivo>.zip`. Antes de restaurar, crea otra copia, así que la restauración también se puede deshacer.
-- **Volver a empezar la sincronización en este PC:** cierre JARVIS y borre `memory/sync.db`. La próxima sincronización vuelve a enviar los hechos locales. Los conflictos se resuelven como siempre.
+- **Volver a empezar la sincronización en este PC:** cierre ATLAS y borre `memory/sync.db`. La próxima sincronización vuelve a enviar los hechos locales. Los conflictos se resuelven como siempre.
 - **Borrar los datos del servidor:** desde el panel de Supabase, en la tabla `memories`. Si borra la cuenta de Supabase, sus filas se borran en cascada.

@@ -31,11 +31,11 @@ jobs:
           $PY installer/build.py
       - uses: actions/upload-artifact@v4
         with:
-          name: jarvis-${{ runner.os }}
+          name: atlas-${{ runner.os }}
           path: |
-            dist/Jarvis-Setup.exe
-            dist/Jarvis.dmg
-            dist/Jarvis-linux.tar.gz
+            dist/Atlas-Setup.exe
+            dist/Atlas.dmg
+            dist/Atlas-linux.tar.gz
           if-no-files-found: error
 
   # A v* tag publishes every installer that built; a failed OS leaves the others downloadable.
@@ -53,7 +53,7 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          name: JARVIS ${{ github.ref_name }}
+          name: ATLAS ${{ github.ref_name }}
           body_path: .github/release-notes.md
           files: dist/*
           fail_on_unmatched_files: false

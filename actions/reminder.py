@@ -66,7 +66,7 @@ except Exception:
 try:
     from win10toast import ToastNotifier
     ToastNotifier().show_toast(
-        "JARVIS Reminder",
+        "ATLAS Reminder",
         "{safe_message}",
         duration=15,
         threaded=False
@@ -90,7 +90,7 @@ except Exception:
         xml_content = f'''<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>JARVIS Reminder: {safe_message}</Description>
+    <Description>ATLAS Reminder: {safe_message}</Description>
   </RegistrationInfo>
   <Triggers>
     <TimeTrigger>

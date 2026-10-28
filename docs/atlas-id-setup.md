@@ -1,27 +1,27 @@
-# JARVIS ID: configuración
+# ATLAS ID: configuración
 
-JARVIS ID es opcional. Sin él, JARVIS funciona igual y la memoria queda solo en este PC.
+ATLAS ID es opcional. Sin él, ATLAS funciona igual y la memoria queda solo en este PC.
 Con él, varios dispositivos comparten los datos de `memory/long_term.json` (identidad,
 preferencias, proyectos, relaciones, deseos y notas). Las conversaciones, el estilo, las
 habilidades aprendidas y la memoria de Engram no salen del PC. Tampoco sale nada que parezca un secreto
 (contraseñas, claves, tokens, PIN).
 
-JARVIS ID no cambia el motor de IA elegido.
+ATLAS ID no cambia el motor de IA elegido.
 
-**Para el usuario no hay nada que configurar.** JARVIS ya trae la URL y la clave pública del
-proyecto de JARVIS (`PROJECT_URL` y `PUBLIC_KEY` en `memory/jarvis_id.py`). El usuario solo
-pulsa **SIGN IN WITH GOOGLE**. Las secciones 1 y 2 son para quien mantiene el proyecto, y ya
+**Para el usuario no hay nada que configurar.** ATLAS ya trae la URL y la clave pública del
+proyecto de ATLAS (`PROJECT_URL` y `PUBLIC_KEY` en `memory/atlas_id.py`). El usuario solo
+pulsa **INICIAR SESIÓN CON GOOGLE**. Las secciones 1 y 2 son para quien mantiene el proyecto, y ya
 están hechas para el proyecto `bevrstsvfikouhacidic`.
 
-## Qué guarda JARVIS y qué no
+## Qué guarda ATLAS y qué no
 
 | Dato | Dónde | Comentario |
 |------|-------|------------|
-| URL del proyecto y clave pública (publishable) | En el código (`memory/jarvis_id.py`) | Pública por diseño. La seguridad la da RLS en el servidor. `config/api_keys.json` puede apuntar a otro proyecto. |
-| Sesión (tokens de acceso y renovación) | `memory/jarvis_id.session` | Cifrada con DPAPI de Windows: solo este usuario de Windows en este PC la descifra. Nunca se escribe en el log. |
+| URL del proyecto y clave pública (publishable) | En el código (`memory/atlas_id.py`) | Pública por diseño. La seguridad la da RLS en el servidor. `config/api_keys.json` puede apuntar a otro proyecto. |
+| Sesión (tokens de acceso y renovación) | `memory/atlas_id.session` | Cifrada con DPAPI de Windows: solo este usuario de Windows en este PC la descifra. Nunca se escribe en el log. |
 | Cola de sincronización | `memory/sync.db` | Cambios que esperan al servidor, versiones conocidas y conflictos. |
-| Secreto de cliente de Google | Solo en el panel de Supabase | JARVIS nunca lo tiene. |
-| Clave `service_role` de Supabase | En ningún sitio de JARVIS | No la pegue nunca en JARVIS. |
+| Secreto de cliente de Google | Solo en el panel de Supabase | ATLAS nunca lo tiene. |
+| Clave `service_role` de Supabase | En ningún sitio de ATLAS | No la pegue nunca en ATLAS. |
 
 Los tres archivos locales están excluidos de git (`.gitignore`) y del instalador.
 
@@ -49,14 +49,14 @@ Los tres archivos locales están excluidos de git (`.gitignore`) y del instalado
    http://127.0.0.1:53682/callback
    ```
 
-   JARVIS abre un servidor local en ese puerto solo mientras usted inicia sesión
-   (flujo OAuth PKCE). Si el puerto está ocupado, JARVIS lo dice.
+   ATLAS abre un servidor local en ese puerto solo mientras usted inicia sesión
+   (flujo OAuth PKCE). Si el puerto está ocupado, ATLAS lo dice.
 
-## 3. Conectar JARVIS
+## 3. Conectar ATLAS
 
-No hay que pegar nada: JARVIS ya trae el proyecto. En **CONFIG > ACCOUNT** solo se puede
-cambiar el nombre del dispositivo (**✎ Rename** junto a este dispositivo; por defecto el nombre del PC).
-`device_id` lo crea JARVIS solo: es aleatorio, no el nombre del equipo.
+No hay que pegar nada: ATLAS ya trae el proyecto. En **AJUSTES > CUENTA** solo se puede
+cambiar el nombre del dispositivo (**✎ Renombrar** junto a este dispositivo; por defecto el nombre del PC).
+`device_id` lo crea ATLAS solo: es aleatorio, no el nombre del equipo.
 
 Para usar otro proyecto de Supabase (por ejemplo, uno de pruebas), edite
 `config/api_keys.json` a mano. Esos valores tienen prioridad sobre los del código:
@@ -72,17 +72,17 @@ Nunca ponga la clave `secret` o `service_role` ni en el código ni en ese archiv
 
 Después:
 
-1. **SIGN IN WITH GOOGLE**: se abre el navegador. Al terminar, la pestaña del navegador
+1. **INICIAR SESIÓN CON GOOGLE**: se abre el navegador. Al terminar, la pestaña del navegador
    muestra "SIGNED IN" y su correo (o "SIGN-IN FAILED" y el motivo). El panel muestra su
    correo y este dispositivo queda registrado.
-2. El interruptor **Sync memory across devices** se activa solo al iniciar sesión (puede
-   apagarlo). La primera sincronización sube los datos locales válidos. Luego JARVIS
-   sincroniza cada 5 minutos, y también cuando pulsa **⟳ Sync now**.
+2. El interruptor **Sincronizar memoria entre equipos** se activa solo al iniciar sesión (puede
+   apagarlo). La primera sincronización sube los datos locales válidos. Luego ATLAS
+   sincroniza cada 5 minutos, y también cuando pulsa **⟳ Sincronizar ahora**.
 
-La pestaña también tiene **Sign out**, la lista **YOUR DEVICES** (cada dispositivo ajeno tiene
-**Remove**, que pide un segundo clic para confirmar) y, en **▸ Advanced · diagnostic**,
-**Run diagnostic** (memoria local, Engram y estado de JARVIS ID). Los cambios de nombre se
-guardan al pulsar **SAVE & START**.
+La pestaña también tiene **Cerrar sesión**, la lista **TUS EQUIPOS** (cada dispositivo ajeno tiene
+**Quitar**, que pide un segundo clic para confirmar) y, en **▸ Avanzado · diagnóstico**,
+**Ejecutar diagnóstico** (memoria local, Engram y estado de ATLAS ID). Los cambios de nombre se
+guardan al pulsar **GUARDAR**.
 El arranque escribe el mismo diagnóstico en el log.
 
 ## Cómo funciona la sincronización
@@ -101,15 +101,15 @@ El arranque escribe el mismo diagnóstico en el log.
 ## Copias de seguridad y restauración
 
 `updater.py` guarda en `backups/` la configuración, `long_term.json`, las habilidades,
-`sync.db` y la sesión. JARVIS hace una copia sola cada vez que cambia de versión.
+`sync.db` y la sesión. ATLAS hace una copia sola cada vez que cambia de versión.
 
 - Hacer una copia ahora: `.venv\Scripts\python.exe updater.py backup`
-- Restaurar una copia: cierre JARVIS y ejecute
+- Restaurar una copia: cierre ATLAS y ejecute
   `.venv\Scripts\python.exe updater.py restore backups\<archivo>.zip`.
-  Antes de restaurar, JARVIS hace otra copia (`before-restore`), así que puede deshacerlo.
-- Empezar de cero la sincronización en este PC: cierre JARVIS y borre `memory/sync.db`.
+  Antes de restaurar, ATLAS hace otra copia (`before-restore`), así que puede deshacerlo.
+- Empezar de cero la sincronización en este PC: cierre ATLAS y borre `memory/sync.db`.
   La próxima sincronización vuelve a subir los datos locales.
-- Revocar un dispositivo perdido: desde otro dispositivo, **Remove** en **YOUR DEVICES**. También
+- Revocar un dispositivo perdido: desde otro dispositivo, **Quitar** en **TUS EQUIPOS**. También
   puede borrar su fila en la tabla `devices` de Supabase.
 
 ## Límites conocidos
@@ -120,7 +120,7 @@ El arranque escribe el mismo diagnóstico en el log.
 - Plan gratuito de Supabase: el proyecto se pausa tras una semana sin actividad y hay que
   reactivarlo desde el panel.
 
-- En macOS y Linux la sesión queda solo en memoria: al reiniciar JARVIS hay que iniciar
+- En macOS y Linux la sesión queda solo en memoria: al reiniciar ATLAS hay que iniciar
   sesión otra vez.
 - Solo se comparten datos de `long_term.json`. La memoria de Engram de cada PC sigue siendo
   local; los datos recibidos también se guardan en el Engram del PC que los recibe.

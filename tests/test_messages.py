@@ -140,7 +140,9 @@ class GuiTests(unittest.TestCase):
         gui.write.assert_any_call("hi", interval=0.03)
 
     def test_whatsapp_open_failure(self):
+        # No WhatsApp window open (a real one on the test machine would be reused instead).
         with mock.patch.object(sm, "pyautogui"), \
+             mock.patch("actions.open_app.focus_existing", return_value=False), \
              mock.patch.object(sm, "_open_app", return_value=False), \
              mock.patch.object(sm.time, "sleep"):
             self.assertRegex(send(platform="wa"), _FAILURE)

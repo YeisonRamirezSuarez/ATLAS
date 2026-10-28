@@ -23,7 +23,7 @@ MEMORY_MAX_CHARS = 2200
 
 # Engram (https://github.com/Gentleman-Programming/engram) keeps every fact forever,
 # so facts trimmed from long_term.json stay searchable, and logs every conversation so
-# Jarvis builds up memories with use. Shipped in bin/ (installer); else from PATH; else skipped.
+# Atlas builds up memories with use. Shipped in bin/ (installer); else from PATH; else skipped.
 ENGRAM_BIN     = shutil.which("engram", path=str(BASE_DIR / "bin")) or shutil.which("engram")
 ENGRAM_PROJECT = "mark-xxxix"
 ENGRAM_ERROR   = ""   # why the last engram call failed, "" when it worked (boot diagnostic, UI)
@@ -80,12 +80,12 @@ def diagnose() -> list[str]:
     lines = []
     try:
         mem = load_memory()
-        lines.append(f"Memory file: {len(_all_entries(mem))} facts, "
-                     f"{len(json.dumps(mem, ensure_ascii=False))}/{MEMORY_MAX_CHARS} chars.")
+        lines.append(f"Archivo de memoria: {len(_all_entries(mem))} datos, "
+                     f"{len(json.dumps(mem, ensure_ascii=False))}/{MEMORY_MAX_CHARS} caracteres.")
     except Exception as e:
-        lines.append(f"Memory file: FAILED ({e}).")
+        lines.append(f"Archivo de memoria: FALLÓ ({e}).")
     if not ENGRAM_BIN:
-        return lines + ["Engram: NOT INSTALLED — conversations are not kept long-term."]
+        return lines + ["Engram: NO INSTALADO — las conversaciones no se guardan a largo plazo."]
     version = _engram("version", project=False)
     stats = _engram("stats") or ""
     count = re.search(r"Observations:\s*(\d+)", stats)
@@ -93,23 +93,23 @@ def diagnose() -> list[str]:
     db = Path(db.group(1).strip()) if db else None
     size = f" ({db.stat().st_size / 1e6:.1f} MB)" if db and db.is_file() else ""
     doctor = (_engram("doctor") or "").splitlines()
-    lines.append(f"Engram: {version or 'version unknown'}, "
-                 f"{count.group(1) + ' memories' + size if count else 'stats unavailable'}, "
-                 f"doctor {doctor[0].split(':', 1)[-1].strip() if doctor else 'FAILED'}.")
+    lines.append(f"Engram: {version or 'versión desconocida'}, "
+                 f"{count.group(1) + ' recuerdos' + size if count else 'estadísticas no disponibles'}, "
+                 f"doctor {doctor[0].split(':', 1)[-1].strip() if doctor else 'FALLÓ'}.")
     token, t0 = f"probe{uuid4().hex[:12]}", time.monotonic()
-    obs = _engram_save("jarvis boot probe", token, "diagnostic")
+    obs = _engram_save("atlas boot probe", token, "diagnostic")
     found = obs is not None and token in (_engram("search", token, "--limit", "1") or "")
     gone = obs is not None and _engram("delete", str(obs), "--hard", project=False) is not None
     if obs is not None and found and gone:
-        lines.append(f"Engram write/read/delete: ok ({(time.monotonic() - t0) * 1000:.0f} ms).")
+        lines.append(f"Engram escribir/leer/borrar: ok ({(time.monotonic() - t0) * 1000:.0f} ms).")
     else:
-        step = "write" if obs is None else "read" if not found else f"delete of probe #{obs}"
-        lines.append(f"Engram write/read/delete: FAILED at {step} ({ENGRAM_ERROR or 'not found'}).")
+        step = "escribir" if obs is None else "leer" if not found else f"borrar la prueba #{obs}"
+        lines.append(f"Engram escribir/leer/borrar: FALLÓ al {step} ({ENGRAM_ERROR or 'no encontrado'}).")
     return lines
 
 
-def save_conversation(user_text: str, jarvis_text: str) -> None:
-    _engram_save_async(user_text[:60], f"User: {user_text[:600]}\nJarvis: {jarvis_text[:600]}", "conversation")
+def save_conversation(user_text: str, atlas_text: str) -> None:
+    _engram_save_async(user_text[:60], f"User: {user_text[:600]}\nAtlas: {atlas_text[:600]}", "conversation")
 
 
 def recent_memories(max_chars: int = 1500) -> str:
@@ -315,11 +315,11 @@ def update_memory(memory_update: dict, sync: bool = True) -> dict:
     return memory
 
 
-def should_extract_memory(user_text: str, jarvis_text: str, api_key: str = "") -> bool:
+def should_extract_memory(user_text: str, atlas_text: str, api_key: str = "") -> bool:
     try:
         from or_client import client
 
-        combined = f"User: {user_text[:300]}\nJarvis: {jarvis_text[:1000]}"
+        combined = f"User: {user_text[:300]}\nAtlas: {atlas_text[:1000]}"
 
         result = client.chat(
             f"Does this conversation contain ANY of the following?\n"
@@ -341,11 +341,11 @@ def should_extract_memory(user_text: str, jarvis_text: str, api_key: str = "") -
         return False
 
 
-def extract_memory(user_text: str, jarvis_text: str, api_key: str = "") -> dict:
+def extract_memory(user_text: str, atlas_text: str, api_key: str = "") -> dict:
     try:
         from or_client import client
 
-        combined = f"User: {user_text[:600]}\nJarvis: {jarvis_text[:300]}"
+        combined = f"User: {user_text[:600]}\nAtlas: {atlas_text[:300]}"
 
         raw = client.chat(
             f"Extract ALL memorable personal facts from this conversation. Any language.\n"
@@ -357,20 +357,20 @@ def extract_memory(user_text: str, jarvis_text: str, api_key: str = "") -> dict:
             f"                  favorite_game, favorite_sport, favorite_book, favorite_artist,\n"
             f"                  favorite_country, hobbies, interests, dislikes, etc.\n"
             f"  projects      → projects being built, ongoing work, goals, ideas in progress\n"
-            f"                  (e.g. mark_xxv: 'Building a JARVIS-like AI assistant')\n"
+            f"                  (e.g. mark_xxv: 'Building an ATLAS-like AI assistant')\n"
             f"  relationships → people mentioned: friends, family, partner, colleagues\n"
             f"                  (e.g. best_friend_ali: 'Best friend, met in university')\n"
             f"  wishes        → future plans, things to buy, travel plans, dreams\n"
             f"  notes         → anything else worth remembering (habits, schedule, etc.)\n\n"
             f"IMPORTANT:\n"
             f"- Be LIBERAL: if something MIGHT be worth remembering, include it.\n"
-            f"- Extract from BOTH user and Jarvis turns.\n"
+            f"- Extract from BOTH user and Atlas turns.\n"
             f"- Skip: weather, reminders, search results, one-time commands.\n"
             f"- Use concise English values regardless of conversation language.\n\n"
             f"Format:\n"
             f'{{"identity":{{"name":{{"value":"Ali"}}}},\n'
             f' "preferences":{{"favorite_color":{{"value":"blue"}}}},\n'
-            f' "projects":{{"mark_xxv":{{"value":"JARVIS-like AI assistant"}}}},\n'
+            f' "projects":{{"mark_xxv":{{"value":"ATLAS-like AI assistant"}}}},\n'
             f' "relationships":{{"friend_yusuf":{{"value":"close friend"}}}},\n'
             f' "wishes":{{"buy_guitar":{{"value":"wants an acoustic guitar"}}}},\n'
             f' "notes":{{"works_at_night":{{"value":"usually active late at night"}}}}}}\n\n'
@@ -484,7 +484,7 @@ STYLE_OPTIONS = {
 
 
 def set_style(changes: dict, reset: bool = False) -> str:
-    """How the user wants JARVIS to talk, set only on request. Kept apart from personal
+    """How the user wants ATLAS to talk, set only on request. Kept apart from personal
     facts and skills, as plain strings so the size trim never drops it and Engram never gets it."""
     bad = []
     with _update_lock:

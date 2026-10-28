@@ -1,5 +1,5 @@
 ﻿"""
-Shared memory across the devices of one JARVIS ID: the facts of long_term.json, nothing else
+Shared memory across the devices of one ATLAS ID: the facts of long_term.json, nothing else
 (conversations, style, no-confirmation cases and learned skills stay on this PC).
 
 Offline first: every change waits in memory/sync.db until the server accepts it, so nothing
@@ -118,7 +118,7 @@ def _push(con, rest, device: str) -> tuple[int, int]:
         known = con.execute("select version from known where id=?", (fact_id,)).fetchone()
         category, key = fact_id.split("/", 1)
         body = {"value": value, "deleted": deleted, "device_id": device}
-        from memory.jarvis_id import IDError
+        from memory.atlas_id import IDError
         try:
             if known is None:
                 rows = rest("POST", "memories", headers={"Prefer": "return=representation"},
@@ -167,33 +167,33 @@ def _pull(con, rest) -> int:
 
 def sync_now() -> str:
     """Push what waits, then pull the other devices' changes. One line for the log."""
-    from memory import jarvis_id
+    from memory import atlas_id
     if not enabled():
-        return "Memory sync is off."
+        return "La sincronización de memoria está apagada."
     with _lock, _db() as con:
         try:
-            if not jarvis_id.touch_device():
-                jarvis_id.logout()
-                raise jarvis_id.IDError("this device was removed from the JARVIS ID account; signed out")
-            if _meta(con, "seeded") != jarvis_id.status()["user_id"]:   # first sync of this account here
+            if not atlas_id.touch_device():
+                atlas_id.logout()
+                raise atlas_id.IDError("this device was removed from the ATLAS ID account; signed out")
+            if _meta(con, "seeded") != atlas_id.status()["user_id"]:   # first sync of this account here
                 con.execute("delete from known")
                 con.execute("delete from meta where k='last_pull'")
                 for fact_id, value in _local_facts().items():
                     if KEY_RE.match(fact_id.split("/", 1)[1]) and not is_secret(fact_id, value):
                         con.execute("insert or ignore into queue values (?, ?, 0, ?)", (fact_id, value, _now()))
-                _meta(con, "seeded", jarvis_id.status()["user_id"])
+                _meta(con, "seeded", atlas_id.status()["user_id"])
                 con.commit()
-            device = jarvis_id.device_id()
-            pushed, conflicts = _push(con, jarvis_id.rest, device)
-            pulled = _pull(con, jarvis_id.rest)
-        except jarvis_id.IDError as e:
+            device = atlas_id.device_id()
+            pushed, conflicts = _push(con, atlas_id.rest, device)
+            pulled = _pull(con, atlas_id.rest)
+        except atlas_id.IDError as e:
             _meta(con, "last_error", str(e))
             _meta(con, "last_error_at", _now())
-            return f"Memory sync FAILED: {e}. Changes wait in the local queue."
+            return f"Sincronización de memoria FALLÓ: {e}. Los cambios esperan en la cola local."
         _meta(con, "last_sync", _now())
         _meta(con, "last_error", "")
-        msg = f"Memory sync ok: {pushed} sent, {pulled} received"
-        return msg + (f", {conflicts} conflicts (server copy kept, yours saved)." if conflicts else ".")
+        msg = f"Sincronización de memoria ok: {pushed} enviados, {pulled} recibidos"
+        return msg + (f", {conflicts} conflictos (se mantuvo la copia del servidor, la tuya quedó guardada)." if conflicts else ".")
 
 
 def stats() -> dict:
@@ -206,18 +206,18 @@ def stats() -> dict:
 
 
 def describe() -> str:
-    """One line on JARVIS ID and sync for the boot log and the settings panel."""
-    from memory import jarvis_id
-    st = jarvis_id.status()
+    """One line on ATLAS ID and sync for the boot log and the settings panel."""
+    from memory import atlas_id
+    st = atlas_id.status()
     if not st["configured"]:
-        return "JARVIS ID: not set up (optional); memory stays on this PC."
+        return "ATLAS ID: sin configurar (opcional); la memoria se queda en esta PC."
     if not st["signed_in"]:
-        return "JARVIS ID: set up, not signed in; memory stays on this PC."
+        return "ATLAS ID: configurado, sin sesión iniciada; la memoria se queda en esta PC."
     if not enabled():
-        return f"JARVIS ID: signed in as {st['email']}; memory sync off."
+        return f"ATLAS ID: sesión de {st['email']}; sincronización apagada."
     s = stats()
-    line = f"JARVIS ID: signed in as {st['email']}; memory sync on, {s['synced']} synced, {s['pending']} pending"
-    return line + (f", last error: {s['last_error']}." if s["last_error"] else ".")
+    line = f"ATLAS ID: sesión de {st['email']}; sincronización activa, {s['synced']} sincronizados, {s['pending']} pendientes"
+    return line + (f", último error: {s['last_error']}." if s["last_error"] else ".")
 
 
 def recent_conflicts(limit: int = 5) -> list[tuple]:

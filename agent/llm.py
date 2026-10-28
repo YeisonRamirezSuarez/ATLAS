@@ -75,9 +75,44 @@ def complete(prompt: str, system: str = "", fast: bool = False, max_tokens: int 
     return text
 
 
+SKILL_SOURCES = ["user", "project"]   # ~/.claude (never CLAUDE_CONFIG_DIR, see config) + <cwd>/.claude
+
+
+def _skills_only(keep=()) -> str:
+    """--settings for a session that loads ~/.claude only for its skills: the user's hooks and the plugins
+    not named in keep (caveman, superpowers...) would inject their own instructions into ATLAS's prompt."""
+    try:
+        plugins = json.loads((Path.home() / ".claude" / "settings.json").read_text(encoding="utf-8"))["enabledPlugins"]
+    except Exception:
+        plugins = {}
+    return json.dumps({"disableAllHooks": True, "enabledPlugins": {k: k.split("@")[0] in keep for k in plugins}})
+
+
+def trust_folder(folder, cfg: Path = None) -> None:
+    """Claude Code's 'trust this folder' answer, saved the way its dialog does in ~/.claude.json: a headless
+    run in an untrusted folder ignores the project's .claude/settings.json (its permissions.allow...)."""
+    cfg = cfg or Path.home() / ".claude.json"
+    key = Path(folder).resolve().as_posix()
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        project = data.setdefault("projects", {}).setdefault(key, {})
+        if project.get("hasTrustDialogAccepted"):
+            return   # already trusted: no write, so Claude Code's own writes are rarely raced
+        project["hasTrustDialogAccepted"] = True
+        tmp = cfg.with_name(cfg.name + ".atlas-tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(cfg)   # atomic: a half-written ~/.claude.json would lose the user's Claude Code setup
+    except Exception as e:
+        print(f"[LLM] could not mark {key} as trusted in Claude Code: {e}")
+
+
 def subscription_options(system: str, model: str, persist: bool = False, **kw):
     """Claude Agent SDK options that bill the Claude Code login (Pro/Max), never an API key.
-    No user settings/plugins/hooks and no built-in tools unless the caller passes them.
+    No user settings/plugins/hooks/skills and no built-in tools unless the caller passes them
+    (setting_sources=SKILL_SOURCES plus "Skill" in tools: the master ~/.claude/skills and the
+    project's .claude/skills, shared with the user's other Claude Code profiles; their hooks stay
+    off, and so do their plugins except those named in plugins=(...), e.g. ("superpowers",)).
+    Never the user's MCP servers or claude.ai connectors: a helper that saw them took them for its tools.
     persist=False: the CLI writes no session transcript to ~/.claude/projects (every helper
     call used to leave one, so they piled up as chats). Self-improvement keeps its own."""
     import os
@@ -87,9 +122,14 @@ def subscription_options(system: str, model: str, persist: bool = False, **kw):
     token = (get_config().get("claude_oauth_token") or "").strip()
     if token:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token
-    extra = {} if persist else {"no-session-persistence": None}
-    return ClaudeAgentOptions(model=model, system_prompt=system or None, setting_sources=[],
-                              env=env, extra_args=extra, **{"tools": [], **kw})
+    extra = {"strict-mcp-config": None} if persist else {"strict-mcp-config": None, "no-session-persistence": None}
+    keep = kw.pop("plugins", ())
+    if kw.get("setting_sources"):
+        extra["settings"] = _skills_only(keep)
+    if kw.get("cwd"):   # the folder the user asked ATLAS to work in
+        trust_folder(kw["cwd"])
+    return ClaudeAgentOptions(model=model, system_prompt=system or None, env=env, extra_args=extra,
+                              **{"tools": [], "setting_sources": [], **kw})
 
 
 def claude_cli() -> str:

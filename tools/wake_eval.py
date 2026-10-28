@@ -1,7 +1,7 @@
 """
 Measures wake word false negatives / false positives on your own recordings.
 
-  tools/wake_eval/positive/*.wav   clips where someone says "Jarvis" (any variant)
+  tools/wake_eval/positive/*.wav   clips where someone says "Atlas" (any variant)
   tools/wake_eval/negative/*.wav   clips of normal talk, TV, music... without it
 
 WAV: 16 kHz, mono, 16-bit. Run:  python tools/wake_eval.py [model_dir] [clips_dir]

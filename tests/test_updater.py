@@ -65,21 +65,34 @@ class CheckTests(unittest.TestCase):
                                      {"tag_name": tag, "html_url": "https://x/r"}).encode()))
 
     def test_off_without_repo(self):
-        self.assertIn("off", updater.check("2.0.0", None))
+        self.assertIn("apagada", updater.check("2.0.0", None))
 
     def test_newer_and_same(self):
         with self.reply("v2.10.0"):
-            self.assertIn("Update available: v2.10.0", updater.check("2.9.9", "o/r"))
+            self.assertIn("Actualización disponible: v2.10.0", updater.check("2.9.9", "o/r"))
         with self.reply("2.0.0"):
-            self.assertIn("up to date", updater.check("2.0.0", "o/r"))
+            self.assertIn("está al día", updater.check("2.0.0", "o/r"))
 
     def test_network_error_is_a_failure(self):
         with mock.patch.object(updater.urllib.request, "urlopen", side_effect=OSError("offline")):
-            self.assertTrue(updater.check("2.0.0", "o/r").startswith("Could not"))
+            self.assertTrue(updater.check("2.0.0", "o/r").startswith("No se pudo"))
+
+    def test_tools_list_only_newer_and_skip_failures(self):
+        pypi = {"anthropic": "2.10.0", "openai": "3.0.0"}   # newer, older; the rest fail to load
+        def get(url, timeout):
+            name = url.split("/")[-2]
+            if name not in pypi:
+                raise OSError("offline")
+            return {"info": {"version": pypi[name]}}
+        with mock.patch.object(updater, "PACKAGES", ["anthropic", "openai", "ddgs"]), \
+             mock.patch.object(updater, "_get_json", get), \
+             mock.patch.object(updater.importlib.metadata, "version", lambda p: "2.9.0" if p == "anthropic" else "3.1"), \
+             mock.patch.object(updater.shutil, "which", lambda *a, **k: None):
+            self.assertEqual(updater.check_tools(), ["anthropic 2.9.0 -> 2.10.0"])
 
 
 class SelfChangeGuardTests(unittest.TestCase):
-    """Chat tools must not rewrite JARVIS's own folder; changes elsewhere still work."""
+    """Chat tools must not rewrite ATLAS's own folder; changes elsewhere still work."""
     def test_file_tools_refuse_own_folder(self):
         from actions import file_controller as fc
         from config import APP_DIR
