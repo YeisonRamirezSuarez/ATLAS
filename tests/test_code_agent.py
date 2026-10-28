@@ -10,7 +10,10 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage
+try:
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage
+except ImportError as e:
+    raise unittest.SkipTest(f"claude-agent-sdk missing: {e}")
 
 from actions import code_agent as ca
 
@@ -39,6 +42,7 @@ class CodeAgentTest(unittest.TestCase):
         player, delivered = mock.Mock(), []
         with mock.patch("claude_agent_sdk.query", side_effect=_fake_run) as q, \
              mock.patch("agent.self_improve._model", return_value=("claude-opus-5-5", {})), \
+             mock.patch("agent.llm.get_config", return_value={}), \
              mock.patch("agent.llm.trust_folder") as trust:
             ca._work(params.get("rid", "r1"), "review the code", self.tmp.name, params.get("session"),
                      player, delivered.append)

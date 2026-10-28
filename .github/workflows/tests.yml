@@ -12,11 +12,19 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen   # the HUD/settings tests build Qt windows; runners have no display
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      # Core tests are offline and need only the standard library; tests that need the
-      # audio/UI stack skip themselves when it is missing.
-      - run: python -m unittest discover tests -v
+      - uses: astral-sh/setup-uv@v6
+      - name: Linux audio/Qt libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 libxcb-cursor0 libegl1 libgl1 libxkbcommon0 libfontconfig1
+      # Same environment as the installers (build.yml): the core tests import numpy, psutil, requests...
+      - run: uv venv -p 3.11 .venv
+      - run: uv pip install -p .venv -r requirements.txt
+      - name: Unit tests
+        shell: bash
+        run: |
+          PY=.venv/bin/python; [ -f .venv/Scripts/python.exe ] && PY=.venv/Scripts/python.exe
+          $PY -m unittest discover tests -v
