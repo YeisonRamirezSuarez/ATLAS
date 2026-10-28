@@ -398,6 +398,16 @@ class DesktopSandboxTests(unittest.TestCase):
         self.assertTrue(self.run("ctypes.windll").startswith("Error"))
 
 
+async def _until(cond, secs=5.0):
+    """Polls cond instead of a fixed sleep: CI runners without audio take a while to list devices."""
+    import asyncio
+    for _ in range(int(secs / 0.02)):
+        if cond():
+            return True
+        await asyncio.sleep(0.02)
+    return cond()
+
+
 class MainToolResultTests(unittest.TestCase):
     """main.py needs the audio/UI stack; skipped where it is not installed (CI)."""
 
@@ -813,11 +823,10 @@ class MainToolResultTests(unittest.TestCase):
             j.audio_in_queue = asyncio.Queue()
             task = asyncio.create_task(j._play_audio())
             j.audio_in_queue.put_nowait(b"\0" * 64)
-            await asyncio.sleep(0.1)
-            self.assertTrue(j._is_speaking)
+            self.assertTrue(await _until(lambda: j._is_speaking))
             j._turn_done = True   # streamed TTS: marked done only after its last chunk played
-            await asyncio.sleep(0.6)
-            stuck = j._is_speaking
+            # 5 s: well under the 10 s idle fallback, so this still proves _turn_done reopens the mic
+            stuck = not await _until(lambda: not j._is_speaking)
             task.cancel()
             return stuck
         with mock.patch.object(m.sd, "RawOutputStream"):
@@ -836,7 +845,7 @@ class MainToolResultTests(unittest.TestCase):
             j.audio_in_queue = asyncio.Queue()
             task = asyncio.create_task(j._play_audio())
             j.audio_in_queue.put_nowait(b"\0" * 64)
-            await asyncio.sleep(0.5)
+            await _until(lambda: fresh.write.called or task.done())
             alive = not task.done()
             task.cancel()
             return alive
