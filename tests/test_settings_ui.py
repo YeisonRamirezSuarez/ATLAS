@@ -48,7 +48,8 @@ class VoiceTests(unittest.TestCase):
                "voice_volume": 40}
         played = []
         with mock.patch("voice.read_aloud", mock.AsyncMock(return_value=b"\x10\x00" * 4)), \
-             mock.patch("sounddevice.play", side_effect=lambda a, sr: played.append(a.tolist())), \
+             mock.patch.dict(sys.modules, {"sounddevice": mock.Mock(   # the real one needs a sound server
+                 play=lambda a, sr: played.append(a.tolist()))}), \
              mock.patch.object(ui.threading, "Thread", side_effect=lambda target, daemon: mock.Mock(start=target)):
             ov = ui.SettingsOverlay(cfg, can_cancel=True)
             self.assertEqual((ov._voice.currentData(), ov._speed.currentData(), ov._volume.value()), ("Puck", "rapida", 40))
