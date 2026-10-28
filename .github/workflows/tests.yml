@@ -27,4 +27,9 @@ jobs:
         shell: bash
         run: |
           PY=.venv/bin/python; [ -f .venv/Scripts/python.exe ] && PY=.venv/Scripts/python.exe
-          $PY -m unittest discover tests -v
+          set +e
+          PYTHONIOENCODING=utf-8 $PY -m unittest discover tests -v 2>&1 | tee unittest.log
+          status=${PIPESTATUS[0]}
+          # Each failing test as an annotation on the run page, readable without signing in to see the log.
+          $PY tools/ci_annotate.py unittest.log
+          exit $status
