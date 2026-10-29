@@ -4,6 +4,7 @@ config/api_keys.json
 memory/long_term.json
 memory/skills/
 atlas.log
+memory/skill_decisions.jsonl
 jarvis.log
 dist/
 build/
@@ -25,3 +26,13 @@ memory/ack*.pcm
 .superpowers/
 *.bak_*
 Atlas.spec
+config/phone_token.txt
+config/ntfy_topic.txt
+config/gemini_cookies.json
+config/gemini_webapi/
+memory/pending.json
+memory/voices.json
+memory/voices/
+clock/
+memory/tasks.json
+config/mcp_servers.json

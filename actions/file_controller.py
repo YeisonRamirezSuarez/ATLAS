@@ -216,12 +216,21 @@ def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
         return f"Error listing files: {e}"
 
 
-def create_file(path: str, content: str = "") -> str:
+def _overwrite_question(target: Path) -> str:
+    """Replacing an existing file loses its content: the user says yes first."""
+    return (f"NEEDS CONFIRMATION. Nothing written yet: {target} already exists ({_format_size(target.stat().st_size)}) "
+            "and writing replaces its content. Tell the user in one sentence and ask. Only after a clear yes, "
+            "call again with the same fields and confirmed='yes'.")
+
+
+def create_file(path: str, content: str = "", confirmed: bool = False) -> str:
     """Creates a new file with optional content."""
     try:
         target = Path(path).expanduser()
         if msg := protected(target):
             return msg
+        if target.is_file() and not confirmed:
+            return _overwrite_question(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return f"File created: {target.name}"
@@ -361,12 +370,14 @@ def read_file(path: str, max_chars: int = 3000) -> str:
         return f"Could not read file: {e}"
 
 
-def write_file(path: str, content: str, append: bool = False) -> str:
+def write_file(path: str, content: str, append: bool = False, confirmed: bool = False) -> str:
     """Writes or appends content to a file."""
     try:
         target = Path(path).expanduser()
         if msg := protected(target):
             return msg
+        if target.is_file() and not append and not confirmed:
+            return _overwrite_question(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         mode = "a" if append else "w"
         with open(target, mode, encoding="utf-8") as f:
@@ -547,6 +558,7 @@ def file_controller(
     path    = (parameters or {}).get("path", "desktop")
     name    = (parameters or {}).get("name", "")
     content = (parameters or {}).get("content", "")
+    confirmed = str((parameters or {}).get("confirmed", "")).lower() == "yes" or bool((parameters or {}).get("_trusted"))
 
     def _full_path(p: str, n: str) -> str:
         base = _resolve_path(p)
@@ -562,7 +574,7 @@ def file_controller(
 
         elif action == "create_file":
             full = _full_path(path, name)
-            result = create_file(full, content=content)
+            result = create_file(full, content=content, confirmed=confirmed)
 
         elif action == "create_folder":
             full = _full_path(path, name)
@@ -593,7 +605,8 @@ def file_controller(
             result = write_file(
                 full,
                 content=content,
-                append=parameters.get("append", False)
+                append=parameters.get("append", False),
+                confirmed=confirmed
             )
 
         elif action == "open":
@@ -633,4 +646,4 @@ def file_controller(
     if player:
         player.write_log(f"[file] {result[:60]}")
 
-    return result
+    return result

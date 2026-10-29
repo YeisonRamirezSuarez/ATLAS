@@ -134,5 +134,48 @@ class CloseAppTests(unittest.TestCase):
             self.assertIn("ATLAS itself", cs.computer_settings({"action": "close_app"}))
 
 
+class BluetoothTests(unittest.TestCase):
+    def test_no_matching_action_is_said_not_crashed(self):
+        detect = mock.Mock(return_value={"action": None, "value": None})   # the detector found nothing
+        with mock.patch.object(cs, "_detect_action", detect):
+            self.assertEqual(cs.computer_settings({"description": "haz magia"}), "No action could be determined.")
+            self.assertEqual(cs.computer_settings({"action": None, "description": None}), "No action could be determined.")
+        detect.assert_called_once()   # asked once, not again for the same request
+
+    def test_names_models_invent_reach_the_action(self):
+        with mock.patch.object(cs, "away_from_atlas", return_value=False), \
+             mock.patch.object(cs, "_bluetooth", return_value="Bluetooth is now off (read back from the radio).") as bt:
+            self.assertIn("now off", cs.computer_settings({"action": "disable_bluetooth"}))   # no window needed
+        bt.assert_called_once_with(False)
+
+    def test_windows_reads_the_radio_back(self):
+        def ps(out, code=0):
+            return mock.patch.object(cs.subprocess, "run", return_value=mock.Mock(returncode=code, stdout=out, stderr="boom"))
+        with mock.patch.object(cs, "_OS", "Windows"), \
+             mock.patch.object(cs.subprocess, "CREATE_NO_WINDOW", 0, create=True):
+            with ps("access=Allowed\nradio=On\n") as run:
+                self.assertEqual(cs.bluetooth_on(), "Bluetooth is now on (read back from the radio).")
+            self.assertIn("::On", run.call_args[0][0][-1])
+            with ps("access=Allowed\nradio=On\n"):
+                self.assertIn("still reads On", cs.bluetooth_off())
+            with ps("access=DeniedByUser\n"):
+                self.assertIn("Privacy & security > Radios", cs.bluetooth_off())
+            with ps("access=Allowed\n"):
+                self.assertIn("no Bluetooth radio", cs.bluetooth_off())
+            with ps("", 1):
+                self.assertTrue(cs.bluetooth_off().startswith("Could not turn Bluetooth off: boom"))
+
+    def test_linux_rfkill(self):
+        listing = "0: hci0: Bluetooth\n\tSoft blocked: no\n\tHard blocked: no\n"
+        run, calls = fake({"rfkill list": listing})
+        with mock.patch.object(cs, "_OS", "Linux"), mock.patch.object(cs, "_run", run):
+            self.assertEqual(cs.bluetooth_on(), "Bluetooth is now on (read back from the radio).")
+            self.assertIn(("rfkill", "unblock", "bluetooth"), calls)
+            self.assertIn("still reads On", cs.bluetooth_off())
+        run, _ = fake({"rfkill unblock": RuntimeError("rfkill: not installed")})
+        with mock.patch.object(cs, "_OS", "Linux"), mock.patch.object(cs, "_run", run):
+            self.assertEqual(cs.bluetooth_on(), "Could not turn Bluetooth on: rfkill: not installed")
+
+
 if __name__ == "__main__":
     unittest.main()

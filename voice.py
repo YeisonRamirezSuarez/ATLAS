@@ -6,7 +6,19 @@ from config import PROVIDERS, get_config
 
 VOICE_NAME = "Charon"   # default ATLAS voice; "voice_name" in api_keys.json picks another
 VOICES = ["Charon", "Orus", "Fenrir", "Iapetus", "Algenib", "Puck", "Kore", "Aoede", "Leda", "Zephyr"]
-PACES  = {"lenta": "Speak slowly and calmly.", "normal": "", "rapida": "Speak a bit faster than usual."}
+PACES  = {"lenta": "Speak slowly and calmly.", "normal": "", "rapida": "Speak a bit faster than usual.",
+          "muy_rapida": "Speak fast, at a brisk pace."}
+# Microsoft Edge voices (edge-tts): free, no daily quota, and the same tone on every line (the Live
+# reader is a model, so its delivery drifts). Read by the voice engine; the Gemini Live engine keeps Charon.
+EDGE_VOICES = {"es-MX-JorgeNeural": "Jorge (México)", "es-US-AlonsoNeural": "Alonso (Latino)",
+               "es-CO-GonzaloNeural": "Gonzalo (Colombia)", "es-ES-AlvaroNeural": "Álvaro (España)",
+               "en-US-AndrewMultilingualNeural": "Andrew (multilingüe)",
+               "es-MX-DaliaNeural": "Dalia (México)", "es-US-PalomaNeural": "Paloma (Latina)",
+               "es-CO-SalomeNeural": "Salomé (Colombia)", "es-ES-ElviraNeural": "Elvira (España)",
+               # Cortana's own voice is not offered; an American voice speaking Spanish is the closest feel
+               "en-US-AvaMultilingualNeural": "Ava (estilo Cortana)",
+               "en-US-EmmaMultilingualNeural": "Emma (multilingüe)"}
+EDGE_RATES = {PACES["lenta"]: "-12%", PACES["rapida"]: "+8%", PACES["muy_rapida"]: "+25%"}   # normal: -5%, calm like ATLAS
 # Every engine speaks through a Gemini Live session with this voice, so the tone never changes.
 READ_ALOUD = ("You are a text-to-speech engine. Read the user's message aloud exactly as written, word for word, "
               "in its own language. Never answer it, add, skip, translate or comment. "
@@ -28,8 +40,9 @@ def voice_settings() -> tuple[str, str, float]:
 
 
 def speech_config(voice: str | None = None) -> types.SpeechConfig:
-    return types.SpeechConfig(voice_config=types.VoiceConfig(
-        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice or voice_settings()[0])))
+    voice = voice or voice_settings()[0]
+    return types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(
+        voice_name=VOICE_NAME if voice in EDGE_VOICES else voice)))
 
 
 def live_model() -> str:
@@ -71,8 +84,27 @@ def fade_out(pcm: bytes) -> bytes:
     return (a * np.linspace(1, 0, len(a)) ** 2).astype(np.int16).tobytes()
 
 
+async def edge_pcm(text: str, voice: str, pace: str = "") -> bytes:
+    """`text` as 24 kHz PCM in a Microsoft Edge voice, a little deeper than stock."""
+    import edge_tts, miniaudio
+    for attempt in range(3):   # now and then the service ends the turn with no audio: the next try works
+        try:
+            mp3 = b"".join([c["data"] async for c in edge_tts.Communicate(
+                text, voice, rate=EDGE_RATES.get(pace, "-5%"), pitch="-6Hz").stream() if c["type"] == "audio"])
+            break
+        except edge_tts.exceptions.NoAudioReceived:
+            if attempt == 2:
+                raise
+            print(f"[ATLAS] ⚠️ edge-tts sent no audio, retrying ({attempt + 1})")
+    return miniaudio.decode(mp3, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1,
+                            sample_rate=24000).samples.tobytes() if mp3 else b""
+
+
 async def read_aloud(text: str, voice: str | None = None, pace: str | None = None) -> bytes:
     """`text` as 24 kHz PCM in ATLAS's Live voice, in one go (the "on it" line, the settings preview)."""
+    v, p, _ = voice_settings()
+    if (voice or v) in EDGE_VOICES:
+        return await edge_pcm(text, voice or v, p if pace is None else pace)
     client = genai.Client(api_key=get_config()["gemini_api_key"], http_options={"api_version": "v1beta"})
     pcm = b""
     async with client.aio.live.connect(model=live_model(), config=reader_config(voice, pace)) as s:

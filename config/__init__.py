@@ -1,7 +1,7 @@
 import json, os, platform
 from pathlib import Path
 
-VERSION = "2.5.1"   # single source: UI, installer and Info.plist read it from here
+VERSION = "2.8.0"   # single source: UI, installer and Info.plist read it from here
 
 _CONFIG_PATH = Path(__file__).parent / "api_keys.json"
 

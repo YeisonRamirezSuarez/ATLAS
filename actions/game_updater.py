@@ -788,7 +788,6 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
                                              daemon=True).start()
                             msg += " Auto-shutdown enabled."
                         if player: player.write_log(f"[GameUpdater] {msg[:100]}")
-                        if speak: speak(msg)
                         return msg
                     else:
                         results.append(f"Steam: {_update_steam_games(steam_path, game_name=game_name)}")
@@ -813,7 +812,6 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
 
         output = " | ".join(results) or "Nothing to do."
         if player: player.write_log(f"[GameUpdater] {output[:100]}")
-        if speak: speak(output)
         return output
 
     return f"Unknown action: '{action}'."
@@ -822,4 +820,4 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
 if __name__ == "__main__":
     if "--scheduled" in sys.argv:
         print(f"[GameUpdater] 🕐 Scheduled run at {datetime.now().strftime('%H:%M')}")
-        print(f"[GameUpdater] ✅ {game_updater({'action': 'update', 'platform': 'both'})}")
+        print(f"[GameUpdater] ✅ {game_updater({'action': 'update', 'platform': 'both'})}")

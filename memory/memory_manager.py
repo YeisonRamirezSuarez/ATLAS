@@ -2,6 +2,7 @@ import json
 import re
 import shutil
 import subprocess
+import unicodedata
 from datetime import datetime
 from threading import Lock, Thread
 from pathlib import Path
@@ -129,37 +130,167 @@ SKILLS_DIR = BASE_DIR / "memory" / "skills"
 BUILTIN_SKILLS_DIR = BASE_DIR / "memory" / "builtin_skills"   # shipped with the app, no user data; not in engram
 
 
+SKILL_LOG = BASE_DIR / "memory" / "skill_decisions.jsonl"   # why each task reused a skill or not
+
+
+def log_skill_decision(goal: str, decision: str, detail: str = "") -> None:
+    """One line per choice (reused, partial, native, new, none_found, not_separable, ...), so a skill
+    that was not reused can be told apart from a skill that was never found."""
+    print(f"[Solver] 🧭 {decision}: {detail[:160]}")
+    line = json.dumps({"at": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "goal": goal[:200],
+                       "decision": decision, "detail": detail[:400]}, ensure_ascii=False)
+    try:
+        with open(SKILL_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        # ponytail: rewrites the file when it passes 1000 lines; a rotating log if it ever gets hot.
+        lines = SKILL_LOG.read_text(encoding="utf-8").splitlines()
+        if len(lines) > 1000:
+            SKILL_LOG.write_text("\n".join(lines[-500:]) + "\n", encoding="utf-8")
+    except OSError as e:
+        print(f"[Solver] ⚠️ decision log not written: {e}")
+
+
+# Requests come in Spanish or English and skills were saved in either: both sides are reduced to
+# the same English terms, so "apaga el bluetooth" meets "Turn off the Bluetooth radio".
+# ponytail: hand glossary of the words tasks use most; embeddings if paraphrases keep missing.
+_PHRASES = ((r"\b(turn|switch)\b(.{0,30}?)\boff\b", r"disable \2"), (r"\b(turn|switch)\b(.{0,30}?)\bon\b", r"enable \2"),
+            (r"\bwi-fi\b", "wifi"), (r"\bbarra de tareas\b", "taskbar"), (r"\bcopia de seguridad\b", "backup"),
+            (r"\bfondo de (pantalla|escritorio)\b", "wallpaper"), (r"\bcaptura de pantalla\b", "screenshot"),
+            (r"\bmodo oscuro\b", "dark mode"), (r"\bmodo claro\b", "light mode"))
+# word start -> term; the longest start that fits wins
+_STEMS = {
+    "apag": "disable", "desactiv": "disable", "deactivat": "disable", "disabl": "disable",
+    "enciend": "enable", "encend": "enable", "prend": "enable", "activa": "enable", "enabl": "enable",
+    "cambi": "change", "chang": "change", "modif": "change",
+    "busc": "find", "busq": "find", "encuentr": "find", "encontr": "find", "search": "find", "find": "find",
+    "descarg": "download", "download": "download", "carpet": "folder", "director": "folder", "folder": "folder",
+    "archiv": "file", "fichero": "file", "imag": "image", "foto": "image", "photo": "image", "pictur": "image",
+    "acento": "accent", "accent": "accent", "color": "color", "colou": "color",
+    "verde": "green", "azul": "blue", "rojo": "red", "roja": "red", "amarill": "yellow", "negr": "black",
+    "blanc": "white", "morad": "purple", "naranja": "orange", "gris": "gray", "grey": "gray", "rosad": "pink",
+    "escritorio": "desktop", "pantall": "screen", "screenshot": "screenshot", "ventan": "window",
+    "cancion": "song", "music": "music", "precio": "price", "volum": "volume", "brillo": "brightness",
+    "bright": "brightness", "borr": "delete", "elimin": "delete", "remov": "delete", "delet": "delete",
+    "abrir": "open", "abre": "open", "abra": "open", "open": "open", "cierr": "close", "cerr": "close",
+    "close": "close", "mostr": "show", "muestr": "show", "show": "show", "instal": "install",
+    "actualiz": "update", "updat": "update", "upgrad": "update", "guard": "save", "copi": "copy", "copy": "copy",
+    "mueve": "move", "muev": "move", "move": "move", "renombr": "rename", "renam": "rename", "vaci": "empty",
+    "papelera": "recycle", "recycl": "recycle", "trash": "recycle", "nuev": "new", "tempor": "temp",
+    "gratis": "free", "bater": "battery", "batter": "battery", "memor": "memory",
+    "aplicac": "app", "applic": "app", "program": "app", "navegador": "browser",
+    "sonido": "sound", "silenci": "mute", "reproduc": "play", "teclado": "keyboard",
+    "raton": "mouse", "idioma": "language", "proces": "process", "servic": "service", "conect": "connect",
+    "connect": "connect", "velocidad": "speed", "notif": "notification", "bloque": "lock", "reinici": "restart",
+    "reboot": "restart", "document": "document", "text": "text", "calcul": "calculate", "result": "result",
+    "numer": "number", "number": "number", "lista": "list", "ordena": "sort", "tarea": "task",
+    "escrib": "write", "write": "write", "correo": "email", "mensaje": "message", "envia": "send", "envio": "send",
+    "impresor": "printer", "imprim": "print", "contrasen": "password", "conex": "connect", "captur": "screenshot",
+    "escane": "scan", "scan": "scan", "revis": "check", "comprueb": "check", "verific": "check", "check": "check",
+    "disponib": "free", "availab": "free", "resoluc": "resolution", "shutdown": "disable", "tamano": "size", "espacio": "space", "usag": "usage",
+    "clima": "weather", "oscur": "dark", "tema": "theme", "computador": "computer", "ordenador": "computer",
+    "ajust": "set", "adjust": "set", "establec": "set", "aument": "increase", "sube": "increase",
+    "subir": "increase", "disminu": "decrease", "reduc": "decrease", "baja": "decrease",
+}
+_STEM_KEYS = sorted(_STEMS, key=len, reverse=True)
+_WORDS = {"uso": "usage", "apps": "app", "pon": "set", "pone": "set", "poner": "set", "lee": "read", "leer": "read",
+          "off": "disable", "libre": "free", "disco": "disk", "discos": "disk", "fecha": "date", "hora": "time", "actual": "current", "actuales": "current",
+          "windows": "windows"}   # the OS, not plural 'window'
+_STOP = set("""the and for this that these those with from into onto your you are was were not all any can
+its but has have how what when where which who why will then than them they there their out use using user
+please now just make get turn some more most very also each other only own same such too via
+atlas jarvis sir senor los las del una uno unos unas con por para como este esta esto ese esa eso que mis tus sus
+sobre desde hasta entre pero mas muy todo todos toda todas hay ahora quiero puedes puede podrias necesito
+dime hazme haz hacer favor""".split())
+
+
+def _terms(text: str) -> set[str]:
+    """The comparable words of a task or skill: no accents, Spanish and English mapped to one
+    English term, plurals folded, function words dropped."""
+    text = unicodedata.normalize("NFKD", text.lower()).encode("ascii", "ignore").decode().replace("_", " ")
+    for pattern, repl in _PHRASES:
+        text = re.sub(pattern, repl, text)
+    out = set()
+    for w in re.findall(r"[a-z][a-z0-9]{2,}", text):
+        if w in _WORDS:
+            w = _WORDS[w]
+        elif stem := next((s for s in _STEM_KEYS if w.startswith(s)), None):
+            w = _STEMS[stem]
+        elif len(w) > 4 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        if w not in _STOP:
+            out.add(w)
+    return out
+
+
+def _bare(code: str) -> str:
+    """A skill's code without the VERIFIED and TASK lines save_skill adds."""
+    return re.sub(r"(?m)^# (VERIFIED|TASK):.*$", "", code).strip()
+
+
 def save_skill(goal: str, plan: str, code: str) -> None:
     """Saves a script that ran and checked its own result. Never overwrites: each version is a new
-    file, so an older one is still there to go back to. The output is not stored (it may be personal)."""
+    file, so an older one is still there to go back to. The output is not stored (it may be personal).
+    A script already saved (same code, the VERIFIED and TASK lines aside) is not saved again.
+    The task goes in the file too, so the skill is found again without engram (after a restart)."""
     import platform
     SKILLS_DIR.mkdir(exist_ok=True)
-    name = f"{re.sub(r'[^a-z0-9]+', '_', goal.lower()).strip('_')[:40]}_{datetime.now():%Y%m%d%H%M%S}.py"
-    verified = f"# VERIFIED: {datetime.now():%Y-%m-%d} on {platform.system()} {platform.version()}"
-    (SKILLS_DIR / name).write_text(f"{code.rstrip()}\n{verified}\n", encoding="utf-8")
-    _engram_save_async(f"skill: {goal[:80]}", f"file: {name}\n{plan}\n{verified[2:]}\nTask: {goal}", "skill")
+    if not any(_bare(p.read_text(encoding="utf-8")) == _bare(code) for p in SKILLS_DIR.glob("*.py")):
+        name = f"{re.sub(r'[^a-z0-9]+', '_', goal.lower()).strip('_')[:40]}_{datetime.now():%Y%m%d%H%M%S}.py"
+        verified = f"# VERIFIED: {datetime.now():%Y-%m-%d} on {platform.system()} {platform.version()}"
+        task = "# TASK: " + " ".join(goal.split())[:300]
+        (SKILLS_DIR / name).write_text(f"{_bare(code)}\n{task}\n{verified}\n", encoding="utf-8")
+        _engram_save_async(f"skill: {goal[:80]}", f"file: {name}\n{plan}\n{verified[2:]}\nTask: {goal}", "skill")
+    if not any(_bare(c) == _bare(code) for _, c in _ranked(goal, {})):
+        log_skill_decision(goal, "not_recoverable", "saved, but a search for this same task does not return it")
 
 
 def find_skills(goal: str, limit: int = 3) -> list[tuple[str, str]]:
-    """(task, code) of learned skills similar to `goal`, best match first."""
-    out = _engram("search", goal, "--type", "skill", "--match", "any", "--limit", str(limit)) or ""
-    found = []
-    for title, name in re.findall(r"— skill: (.*)\n\s*file: ([\w-]+\.py)", out):
-        path = SKILLS_DIR / name
-        if path.is_file():
-            found.append((title.strip(), path.read_text(encoding="utf-8")))
-    if len(found) < limit:
-        # ponytail: word overlap with the name and PLAN line; fine for a few dozen builtin skills.
-        words = set(re.findall(r"[a-z]{4,}", goal.lower()))
-        scored = []
-        for path in BUILTIN_SKILLS_DIR.glob("*.py"):
-            code = path.read_text(encoding="utf-8")
-            plan = code.split("\n", 1)[0].removeprefix("# PLAN:").strip()
-            hits = len(words & set(re.findall(r"[a-z]{4,}", f"{path.stem} {plan}".lower())))
-            if hits >= 2:
-                scored.append((hits, plan, code))
-        found += [(plan, code) for _, plan, code in sorted(scored, reverse=True)[:limit - len(found)]]
-    return found
+    """(task, code) of learned and builtin skills similar to `goal`, best match first.
+    engram's any-word search returns only the 20 newest matches, so a recent skill sharing only
+    'Windows' outranked the right one and older skills were never seen: every skill file is
+    ranked here by the terms it shares with the goal, and engram only supplies the task titles
+    of skills saved before the TASK line."""
+    out = _engram("search", goal, "--type", "skill", "--match", "any", "--limit", "20") or ""
+    titles = {name: title.strip() for title, name in re.findall(r"— skill: (.*)\n\s*file: ([\w-]+\.py)", out)}
+    return _ranked(goal, titles, limit)
+
+
+def _ranked(goal: str, titles: dict, limit: int = 3) -> list[tuple[str, str]]:
+    words = _terms(goal)
+    need = min(2, len(words))   # a one-term request ("bluetooth") still finds its skill
+    scored, seen = [], set()
+
+    def add(title: str, text: str, code: str):
+        hits = len(words & _terms(text))
+        if words and hits >= need and _bare(code) not in seen:
+            seen.add(_bare(code))
+            scored.append((hits, title, code))
+
+    # ponytail: reads every skill file per lookup; fine for hundreds, index them if thousands.
+    for path in sorted(SKILLS_DIR.glob("*.py"), key=lambda p: p.stem[-14:], reverse=True):   # newest first
+        code = path.read_text(encoding="utf-8")
+        plan = code.split("\n", 1)[0].removeprefix("# PLAN:").strip()
+        task = m.group(1).strip() if (m := re.search(r"(?m)^# TASK: (.+)$", code)) else ""
+        add(task or titles.get(path.name, plan), f"{path.stem} {task} {titles.get(path.name, '')} {plan}", code)
+    # ponytail: term overlap with the name and PLAN line; fine for a few dozen builtin skills.
+    for path in BUILTIN_SKILLS_DIR.glob("*.py"):
+        code = path.read_text(encoding="utf-8")
+        plan = code.split("\n", 1)[0].removeprefix("# PLAN:").strip()
+        add(plan, f"{path.stem} {plan}", code)
+    scored.sort(key=lambda s: -s[0])   # stable: on a tie, learned skills stay first, newest first
+    return [(title, code) for _, title, code in scored[:limit]]
+
+
+def save_failure(goal: str, plan: str, error: str) -> None:
+    """Episode: an approach that failed for a task, so the next try for a similar one avoids it."""
+    error = " ".join(error.split())[-300:]
+    _engram_save_async(f"failed: {goal[:80]}", f"Tried: {plan[:150]} | Error: {error}", "episode")
+
+
+def find_failures(goal: str, limit: int = 3) -> list[str]:
+    """'task: what was tried and the error' for past failures on tasks similar to `goal`."""
+    out = _engram("search", goal, "--type", "episode", "--match", "any", "--limit", str(limit)) or ""
+    return [f"{t.strip()}: {d.strip()}" for t, d in re.findall(r"— failed: (.*)\n\s*(Tried: .*)", out)]
 
 
 def search_memory(query: str) -> str:
@@ -572,3 +703,51 @@ def forget(key: str, category: str = "notes", sync: bool = True) -> str:
     return f"Forgotten: {category}/{key}"
 
 forget_memory = forget
+
+# Standing instructions and unfinished tasks of a session, kept across a restart: saved right before
+# ATLAS relaunches, read once by the new ATLAS and put in its system prompt for the first turns.
+PENDING_PATH    = BASE_DIR / "memory" / "pending.json"
+PENDING_MAX_AGE = 24 * 3600   # older (e.g. ATLAS crashed, the PC was off for days): stale, dropped
+
+
+def save_pending(items: str, requests: list | None = None) -> None:
+    """items: what the brain listed as standing instructions / pending tasks, one per line;
+    requests: the user's latest messages of the session, as context."""
+    lines = [" ".join(l.split()).lstrip("-• ") for l in str(items or "").splitlines()]
+    data = {"saved": datetime.now().isoformat(timespec="seconds"),
+            "items": [l[:500] for l in lines if l][:20],
+            "requests": [" ".join(str(r).split())[:300] for r in (requests or []) if str(r).strip()][-8:]}
+    if not data["items"] and not data["requests"]:
+        return
+    PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PENDING_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_pending() -> dict | None:
+    """The saved pending items, once: the file is removed so a later start does not repeat them."""
+    try:
+        data = json.loads(PENDING_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    try:
+        PENDING_PATH.unlink()
+    except OSError:
+        pass
+    try:
+        age = (datetime.now() - datetime.fromisoformat(data["saved"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return None
+    return data if age <= PENDING_MAX_AGE and (data.get("items") or data.get("requests")) else None
+
+
+def format_pending_for_prompt(data: dict | None) -> str:
+    if not data:
+        return ""
+    out = [f"[PENDING FROM BEFORE THE RESTART — you restarted at {data.get('saved', '?')}. The user gave "
+           "these in the last session: keep following the standing instructions and finish the pending "
+           "tasks now, without waiting to be asked again; confirmations and safety rules still apply]"]
+    out += [f"  - {i}" for i in data.get("items") or []]
+    if data.get("requests"):
+        out.append("  The user's latest requests before the restart (context, oldest first):")
+        out += [f"    · {r}" for r in data["requests"]]
+    return "\n".join(out) + "\n"

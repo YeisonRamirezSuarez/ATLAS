@@ -55,6 +55,22 @@ class ImageVisionTest(unittest.TestCase):
         img = PIL.Image.open(io.BytesIO(base64.b64decode(images[0]["source"]["data"])))
         self.assertLessEqual(max(img.size), iv.MAX_SIDE)    # shrunk before upload
 
+    def test_pasted_image_is_viewed_from_memory(self):
+        import io
+        buf = io.BytesIO()
+        PIL.Image.new("RGB", (40, 30), (0, 0, 255)).save(buf, "PNG")
+        sent = []
+        with mock.patch.dict(iv.PASTED, clear=True), \
+             mock.patch.object(iv, "_vision_engine", return_value=("claude_sub", "claude-opus-5-5")), \
+             mock.patch.object(iv, "_ask_subscription", side_effect=lambda m, c: sent.append(c) or "a blue square"), \
+             mock.patch.object(iv.Path, "read_bytes", side_effect=AssertionError("read from disk")):
+            name = iv.keep_pasted(buf.getvalue())
+            out = iv.view_images({"paths": name, "question": "¿qué ves?"})
+            self.assertEqual(out, "a blue square")
+            self.assertEqual(sent[0][0]["text"], "Image 1 of 1: pasted-1.png")
+            self.assertEqual(sent[0][1]["source"]["media_type"], "image/png")
+            self.assertTrue(iv.view_images({"paths": "pasted-9.png"}).lower().startswith("could not"))
+
     def test_tool_reports_missing_images_as_failure(self):
         out = iv.view_images({"paths": str(self.dir / "nothing*.png")})
         self.assertTrue(out.lower().startswith("could not"))

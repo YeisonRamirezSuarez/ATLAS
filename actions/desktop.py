@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import platform
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -16,6 +17,8 @@ except ImportError:
     _PYAUTOGUI = False
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+# ponytail: str.replace looks like Path.replace, so a Path.replace overwrite still passes this check
+_FORBIDDEN_CODE = re.compile(r"__|\.(unlink|rmdir|rename|chmod|symlink_to|hardlink_to)\s*\(")
 
 
 def _get_base_dir() -> Path:
@@ -83,6 +86,11 @@ def _execute_generated_code(code: str, player=None) -> str:
     if code.startswith("```"):
         lines = code.split("\n")
         code  = "\n".join(lines[1:-1]).strip()
+
+    # The prompt forbids deleting, but Path exposes it and dunders escape the sandbox: refuse, not trust.
+    if _FORBIDDEN_CODE.search(code):
+        print(f"[Desktop] Refused generated code:\n{code[:300]}")
+        return "Could not do it: the generated action tried to delete, rename or escape its sandbox."
 
     sandbox      = _build_sandbox()
     output_lines = []
@@ -453,4 +461,4 @@ def desktop_control(
 
     except Exception as e:
         print(f"[Desktop] Error: {e}")
-        return f"Desktop control error: {e}"
+        return f"Desktop control error: {e}"

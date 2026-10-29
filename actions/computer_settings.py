@@ -595,6 +595,71 @@ def toggle_wifi():
         except Exception as e:
             print(f"[Settings] toggle_wifi Linux failed: {e}")
 
+# Windows.Devices.Radios from PowerShell 5.1: no window, no extra package. %STATE% is On or Off.
+_BT_PS = r'''
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+    $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+function Await($op, [Type]$t) {
+    $task = $asTask.MakeGenericMethod($t).Invoke($null, @($op))
+    if (-not $task.Wait(20000)) { throw 'WinRT call timed out' }
+    $task.Result
+}
+[Windows.Devices.Radios.Radio, Windows.System.Devices, ContentType=WindowsRuntime] | Out-Null
+[Windows.Devices.Radios.RadioAccessStatus, Windows.System.Devices, ContentType=WindowsRuntime] | Out-Null
+[Windows.Devices.Radios.RadioState, Windows.System.Devices, ContentType=WindowsRuntime] | Out-Null
+$status = [Windows.Devices.Radios.RadioAccessStatus]
+$list = [System.Collections.Generic.IReadOnlyList[Windows.Devices.Radios.Radio]]
+function Bluetooth { @((Await ([Windows.Devices.Radios.Radio]::GetRadiosAsync()) $list) | Where-Object { $_.Kind.ToString() -eq 'Bluetooth' }) }
+"access=$(Await ([Windows.Devices.Radios.Radio]::RequestAccessAsync()) $status)"
+foreach ($r in Bluetooth) {
+    if ($r.State.ToString() -ne '%STATE%') { Await ($r.SetStateAsync([Windows.Devices.Radios.RadioState]::%STATE%)) $status | Out-Null }
+}
+Start-Sleep -Milliseconds 1000
+foreach ($r in Bluetooth) { "radio=$($r.State)" }
+'''
+
+
+def _bluetooth(on: bool) -> str:
+    """Turns every Bluetooth radio on or off, then reads the state back: success only if it changed."""
+    want = "On" if on else "Off"
+    fail = f"Could not turn Bluetooth {want.lower()}"
+    try:
+        if _OS == "Windows":
+            r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _BT_PS.replace("%STATE%", want)],
+                               capture_output=True, text=True, timeout=60,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            lines = r.stdout.split()
+            if r.returncode:
+                raise RuntimeError((r.stderr or r.stdout).strip()[-300:] or f"exit code {r.returncode}")
+            if "access=Allowed" not in lines:
+                return (f"{fail}: Windows denied radio access. Turn on 'Let apps control device radios' "
+                        "in Settings > Privacy & security > Radios.")
+            states = [l.removeprefix("radio=") for l in lines if l.startswith("radio=")]
+        elif _OS == "Darwin":
+            if not shutil.which("blueutil"):
+                return f"{fail}: macOS needs blueutil for this (brew install blueutil)."
+            _run("blueutil", "--power", "1" if on else "0")
+            states = ["On" if _run("blueutil", "--power") == "1" else "Off"]
+        else:
+            _run("rfkill", "unblock" if on else "block", "bluetooth")
+            states = ["On" if soft == hard == "no" else "Off" for soft, hard in re.findall(
+                r"Bluetooth\s+Soft blocked: (\w+)\s+Hard blocked: (\w+)", _run("rfkill", "list", "bluetooth"))]
+    except (OSError, subprocess.TimeoutExpired, RuntimeError) as e:
+        return f"{fail}: {e}"
+    if not states:
+        return f"{fail}: no Bluetooth radio found (the adapter may be disabled or missing)."
+    if any(s != want for s in states):
+        return f"{fail}: the radio still reads {', '.join(states)}."
+    return f"Bluetooth is now {want.lower()} (read back from the radio)."
+
+
+def bluetooth_on():  return _bluetooth(True)
+def bluetooth_off(): return _bluetooth(False)
+
+
 def restart_computer():
     if _OS == "Windows":
         error = _win_shutdown("/r", "/t", "15")
@@ -697,6 +762,8 @@ ACTION_MAP: dict[str, callable] = {
     "open_run":            open_run,
     "dark_mode":           dark_mode,
     "toggle_wifi":         toggle_wifi,
+    "bluetooth_on":        bluetooth_on,
+    "bluetooth_off":       bluetooth_off,
     "restart":             restart_computer,
     "shutdown":            shutdown_computer,
     "cancel_shutdown":     cancel_shutdown,
@@ -710,6 +777,8 @@ _ALIASES = {
     "play": "play_pause", "pause": "play_pause", "resume": "play_pause", "toggle_mute": "mute",
     "set_volume": "volume_set", "set_brightness": "brightness_set", "power_off": "shutdown",
     "turn_off": "shutdown", "reboot": "restart", "abort_shutdown": "cancel_shutdown", "suspend": "sleep",
+    "enable_bluetooth": "bluetooth_on", "turn_on_bluetooth": "bluetooth_on", "bluetooth_enable": "bluetooth_on",
+    "disable_bluetooth": "bluetooth_off", "turn_off_bluetooth": "bluetooth_off", "bluetooth_disable": "bluetooth_off",
 }
 
 _DANGEROUS_ACTIONS = {"restart", "shutdown"}
@@ -718,7 +787,7 @@ _NO_FOCUS = {"volume_up", "volume_down", "volume_set", "mute", "unmute", "bright
              "brightness_set", "sleep_display", "screen_off", "sleep", "lock_screen", "lock", "restart",
              "shutdown", "cancel_shutdown", "play_pause", "pause_video", "next_track", "prev_track",
              "screenshot", "open_settings", "file_explorer", "open_run", "dark_mode", "toggle_wifi",
-             "task_manager", "show_desktop", "switch_window"}
+             "bluetooth_on", "bluetooth_off", "task_manager", "show_desktop", "switch_window"}
 
 
 def _detect_action(description: str) -> dict:
@@ -755,13 +824,14 @@ def computer_settings(
         return "pyautogui is not installed. Run: pip install pyautogui"
 
     params      = parameters or {}
-    raw_action  = params.get("action", "").strip()
-    description = params.get("description", "").strip()
+    raw_action  = str(params.get("action") or "").strip()
+    description = str(params.get("description") or "").strip()
     value       = params.get("value", None)
 
+    detected = None
     if not raw_action and description:
         detected   = _detect_action(description)
-        raw_action = detected.get("action", "")
+        raw_action = str(detected.get("action") or "")   # null: no action fits
         if value is None:
             value = detected.get("value")
 
@@ -770,9 +840,10 @@ def computer_settings(
 
     known = set(ACTION_MAP) | {"volume_set", "brightness_set", "type_text", "write_on_screen", "type",
                                "write", "press_key", "reload_n", "refresh_n", "reload_page_n"}
-    if action not in known and (description or raw_action):
+    if action not in known and detected is None and raw_action:   # an invented name: ask the detector once
         detected = _detect_action(description or raw_action)
-        action   = _ALIASES.get(str(detected.get("action", "")), str(detected.get("action", "")))
+        action   = str(detected.get("action") or "")
+        action   = _ALIASES.get(action, action)
         if value is None:
             value = detected.get("value")
 
@@ -844,4 +915,4 @@ def computer_settings(
         return func() or f"Sent {action}; effect not verified."
     except Exception as e:
         print(f"[Settings] Action failed ({action}): {e}")
-        return f"Action failed ({action}): {e}"
+        return f"Action failed ({action}): {e}"

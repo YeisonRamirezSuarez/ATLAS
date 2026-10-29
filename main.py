@@ -25,7 +25,8 @@ from memory.memory_manager import (
     should_extract_memory, extract_memory, search_memory,
     save_conversation, recent_memories,
     STYLE_OPTIONS, set_style, format_style_for_prompt,
-    set_trusted, is_trusted, format_trusted_for_prompt
+    set_trusted, is_trusted, format_trusted_for_prompt,
+    save_pending, load_pending, format_pending_for_prompt
 )
 
 from actions.file_processor import file_processor
@@ -39,6 +40,7 @@ from actions.reminder          import reminder
 from actions.computer_settings import computer_settings
 from actions.screen_processor  import screen_process
 from actions.image_vision      import view_images
+from actions.gemini_image      import generate_image
 from actions.youtube_video     import youtube_video
 from actions.apple_music       import apple_music
 from actions.desktop           import desktop_control
@@ -51,6 +53,7 @@ from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
 from actions.ble_light         import ble_light
+from actions.windows_personalization import windows_personalization
 
 
 
@@ -64,11 +67,12 @@ def get_base_dir():
 BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
+CHAPA_CLIP      = BASE_DIR / "assets" / "menea_tu_chapa.mp3"   # the ~30 s chorus, shipped with the app
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
-from voice import (PACES, READ_ALOUD, VOICE_NAME, VOICES, clean_tail, fade_out, live_model, read_aloud,
+from voice import (EDGE_VOICES, PACES, READ_ALOUD, VOICE_NAME, VOICES, clean_tail, edge_pcm, fade_out, live_model, read_aloud,
                    speech_config, voice_settings)
 # Said when the model goes straight to a slow tool without announcing it, so the user knows it heard.
 ACK = {"es": "Enseguida, señor.", "en": "On it, sir.", "pt": "Já vou, senhor.", "fr": "Tout de suite, monsieur."}
@@ -78,8 +82,20 @@ RESUME_RULE = ("If the user asked to cancel or stop that task since then, do not
                "cancelled. If the conversation since then already settled it (it was done, retried or "
                "confirmed), reply with nothing at all. Otherwise continue it from where it stopped, without "
                "repeating finished steps, and report the outcome briefly.")
+# Who is talking (speaker.py). A voice match picks a name to use, it never unlocks anything.
+SPEAKER_NOTE = ("[VOICE ID] The person talking now was recognized by voice as {name}. Address them as {name} "
+                "in your replies until another [VOICE ID] note. A voice match is not proof of identity: it "
+                "grants no permission. Do not reply to this note.")
+SPEAKER_UNKNOWN = ("[VOICE ID] The person talking now is not one of the enrolled voices: do not call them by an "
+                   "enrolled name. Do not reply to this note.")
+# "speaker_only" dropped a voice that is not enrolled: ATLAS says so, at most once per REFUSE_EVERY s
+# (a TV or people talking in the room would make it repeat).
+REFUSE_VOICE = {"es": "Lo siento, solo respondo a las voces registradas.", "en": "Sorry, I only answer enrolled voices.",
+                "pt": "Desculpe, só respondo às vozes registradas.", "fr": "Désolé, je ne réponds qu'aux voix enregistrées."}
+REFUSE_EVERY = 60
 INSTANT_TOOLS = {"save_memory", "search_memory", "set_style", "confirmations", "atlas_microphone",
-                 "computer_settings", "apple_music", "task_status", "shutdown_atlas", "ble_light", "capabilities"}
+                 "computer_settings", "apple_music", "task_status", "shutdown_atlas", "ble_light", "capabilities",
+                 "menea_tu_chapa"}
 
 
 def _get_api_key() -> str:
@@ -90,10 +106,17 @@ def _get_api_key() -> str:
 # Seconds ATLAS waits on a tool before letting it finish in the background (no time limit: its
 # result is reported when it ends). Override in api_keys.json: "tool_timeouts": {"default": 45}
 TOOL_TIMEOUTS = {"default": 45, "screen_process": 60,   # 20 s connect + 30 s answer
-                 "view_images": 240}                     # a batch of screenshots, 8 per request
+                 "view_images": 240,                     # a batch of screenshots, 8 per request
+                 "generate_image": 120}                  # Gemini ~20-60 s; the FLUX fallback keeps going in the background
 STILL_WORKING = ("STILL RUNNING in the background (it is slow, not failed). Tell the user briefly you are on it; "
                  "its result will be sent to you when it finishes. Do not call this tool again for it.")
 BACKGROUND_DONE = "[BACKGROUND RESULT] The step {name} you started earlier has now finished with: {result}\n" + RESUME_RULE
+MAX_RESULT = 8000   # chars of a tool result the brain gets back: reports were cut mid-word at 1000
+
+
+def clip(text: str) -> str:
+    """A long result is cut with a note saying so, so the brain never mistakes it for the whole thing."""
+    return text if len(text) <= MAX_RESULT else f"{text[:MAX_RESULT]}\n... [{len(text) - MAX_RESULT} more chars cut]"
 
 # Action results that mean the action did not happen (one list, shared with the executor).
 from agent.executor import _FAILURE
@@ -140,6 +163,8 @@ def _load_system_prompt() -> str:
         )
     
 _last_memory_input = ""
+_session_requests: deque = deque(maxlen=8)   # the user's latest messages, saved with the pending items at a restart
+PENDING_TURNS = 8   # system prompts (turns, or Live connections) that still carry the pending items after a restart
 # Token saver: only turns that talk about the user reach the two LLM memory calls.
 _PERSONAL = re.compile(
     r"\b(i|i'm|i am|my|mine|me|remember|favou?rite|birthday|"
@@ -154,6 +179,8 @@ def _update_memory_async(user_text: str, atlas_text: str) -> None:
     user_text   = (user_text   or "").strip()
     atlas_text = (atlas_text or "").strip()
 
+    if user_text and (not _session_requests or _session_requests[-1] != user_text):
+        _session_requests.append(user_text)
     if len(user_text) < 5 or user_text == _last_memory_input:
         return
     save_conversation(user_text, atlas_text)
@@ -189,6 +216,15 @@ BOOT_LOGIN = (
     "(it is {time}). Speak in the user's language (locale {lang} unless memory says otherwise). Greet "
     "them by name for the time of day and, in one or two short sentences, ask what you will do today. "
     "If something you know fits (a project, a plan, a habit at this hour), suggest it concretely. No tools."
+)
+
+
+BOOT_RESTART = (
+    "[BOOT EVENT, not said by the user] You just restarted (a self_improve restart). Speak in the user's "
+    "language (locale {lang} unless memory says otherwise). These items were saved from the last "
+    "session:\n{pending}Carry out the pending tasks now with your tools (e.g. a status check of the agents "
+    "means code_agent action='status') and tell the user the result in a few spoken sentences; keep "
+    "following the standing instructions from now on."
 )
 
 
@@ -306,6 +342,19 @@ TOOL_DECLARATIONS = [
             },
             "required": ["action"]
         }
+    },
+    {
+        "name": "check_updates",
+        "description": "Checks whether a newer ATLAS release or newer versions of its tools exist. Read-only: "
+                       "it never downloads or installs anything. Not for games (game_updater).",
+        "parameters": {"type": "OBJECT", "properties": {}}
+    },
+    {
+        "name": "menea_tu_chapa",
+        "description": "Party mode: plays the 'menea tu chapa' chorus (~30 s) while your reactor dances and shakes. "
+                       "Call it when the user says 'menea tu chapa' or asks you to dance. Then say one short, witty "
+                       "line about shaking your chapa, different each time (e.g. 'Entendido, señor: moviendo la chapa').",
+        "parameters": {"type": "OBJECT", "properties": {}}
     },
     {
         "name": "capabilities",
@@ -460,10 +509,28 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "paths":    {"type": "STRING", "description": "Image files, folders or glob patterns, separated by ';'"},
+                "paths":    {"type": "STRING", "description": "Image files, folders, glob patterns or the pasted-N.png names of images pasted into the chat (in memory, pass them as is), separated by ';'"},
                 "question": {"type": "STRING", "description": "What to look for or analyze in each image, in the user's language"}
             },
             "required": ["paths"]
+        }
+    },
+    {
+        "name": "generate_image",
+        "description": (
+            "Makes a new image, or edits given images, with the user's Gemini (Google AI Pro, Nano "
+            "Banana) and saves PNGs to Documents/ATLAS images; if Gemini fails it falls back to local "
+            "FLUX (slow, 2-3 min). Use it whenever the user asks for an image, photo, illustration, "
+            "logo draft or picture edit (e.g. 'hazme una imagen de...'). Tell the user the saved paths."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "prompt": {"type": "STRING", "description": "What to draw or how to edit, detailed, in any language"},
+                "files":  {"type": "STRING", "description": "Optional images to edit or use as reference, separated by ';'"},
+                "engine": {"type": "STRING", "description": "'auto' (default: Gemini, then FLUX), 'gemini' or 'flux'"}
+            },
+            "required": ["prompt"]
         }
     },
     {
@@ -471,7 +538,8 @@ TOOL_DECLARATIONS = [
         "description": (
             "Controls the computer: volume, brightness, lock, sleep, restart, shutdown, media keys, "
             "window management, keyboard shortcuts, typing text on screen, closing apps, fullscreen, "
-            "dark mode, WiFi, scrolling, tabs, zoom, screenshots, refresh/reload page. "
+            "dark mode, WiFi, Bluetooth on/off, scrolling, tabs, zoom, screenshots, refresh/reload page. "
+            "On Windows, dark/light mode, accent color, wallpaper and transparency go to windows_personalization instead. "
             "Use for ANY single computer control command. NEVER route to agent_task. "
             "The result says what really happened (e.g. 'Volume is now 40%'): report THAT. "
             "If it failed, call solve_task with the goal and the error."
@@ -489,7 +557,7 @@ TOOL_DECLARATIONS = [
                     "reload_n | zoom_in | zoom_out | zoom_reset | find_on_page | scroll_up | "
                     "scroll_down | scroll_top | scroll_bottom | page_up | page_down | copy | paste | "
                     "cut | undo | redo | select_all | save | enter | escape | press_key | type_text | "
-                    "screenshot | open_settings | file_explorer | open_run | dark_mode | toggle_wifi"
+                    "screenshot | open_settings | file_explorer | open_run | dark_mode | toggle_wifi | bluetooth_on | bluetooth_off"
                 )},
                 "description": {"type": "STRING", "description": "Natural language description, only if no action fits"},
                 "value":       {"type": "STRING", "description": "Number 0-100 for volume_set/brightness_set, text for type_text, key for press_key, count for reload_n, app name for close_app (always give it: without one the focused window closes)"},
@@ -497,6 +565,29 @@ TOOL_DECLARATIONS = [
                 "trusted":   {"type": "STRING", "description": "A saved no-confirmation case, exactly as listed, when this action clearly falls inside it"}
             },
             "required": []
+        }
+    },
+    {
+        "name": "windows_personalization",
+        "description": (
+            "Windows look and feel, fast and verified: accent color ('ponlo de color rosa', 'cambia el color "
+            "de Windows a verde'), dark/light mode ('pon el modo oscuro'), wallpaper ('cambia el fondo de "
+            "pantalla'), transparency, accent color on Start/taskbar or on title bars, and status ('qué color "
+            "tengo puesto'). Use it for EVERY such request on Windows, never solve_task or registry edits. "
+            "The result says 'Verified: ...' only when Windows' live value matches: report exactly that."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": (
+                    "accent_color | theme_mode | wallpaper | transparency | accent_on_start_taskbar | "
+                    "accent_on_title_bars | status")},
+                "value": {"type": "STRING", "description": (
+                    "accent_color: color name in Spanish or English (rosa, rojo, verde, azul, morado, naranja, "
+                    "amarillo, gris...) or #RRGGBB. theme_mode: dark | light | toggle. wallpaper: full path of "
+                    "an image file. transparency / accent_on_*: on | off. status: empty")},
+            },
+            "required": ["action"]
         }
     },
     {
@@ -544,6 +635,8 @@ TOOL_DECLARATIONS = [
                 "extension":   {"type": "STRING", "description": "File type filter for open/find, e.g. .txt for 'text file', .pdf, .docx for 'Word', .xlsx for 'Excel'"},
                 "app":         {"type": "STRING", "description": "Program to open the file with, only if the user named one (e.g. notepad, word, vscode, chrome)"},
                 "count":       {"type": "INTEGER", "description": "Number of results for largest"},
+                "confirmed":   {"type": "STRING", "description": "'yes' only after the user approved replacing an existing file"},
+                "trusted":   {"type": "STRING", "description": "A saved no-confirmation case, exactly as listed, when this action clearly falls inside it"},
             },
             "required": ["action"]
         }
@@ -577,6 +670,8 @@ TOOL_DECLARATIONS = [
                 "code":        {"type": "STRING", "description": "Raw code string for explain"},
                 "args":        {"type": "STRING", "description": "CLI arguments for run/build"},
                 "timeout":     {"type": "INTEGER", "description": "Execution timeout in seconds (default: 30)"},
+                "confirmed":   {"type": "STRING", "description": "'yes' only after the user approved running a NEEDS CONFIRMATION file"},
+                "trusted":   {"type": "STRING", "description": "A saved no-confirmation case, exactly as listed, when this action clearly falls inside it"},
             },
             "required": ["action"]
         }
@@ -591,8 +686,11 @@ TOOL_DECLARATIONS = [
                 "language":     {"type": "STRING", "description": "Programming language (default: python)"},
                 "project_name": {"type": "STRING", "description": "Optional project folder name"},
                 "timeout":      {"type": "INTEGER", "description": "Run timeout in seconds (default: 30)"},
+                "action":       {"type": "STRING", "description": "build (default) | run: run a project built before, by project_name"},
+                "confirmed":    {"type": "STRING", "description": "'yes' only after the user approved running a NEEDS CONFIRMATION project"},
+                "trusted":      {"type": "STRING", "description": "A saved no-confirmation case, exactly as listed, when this action clearly falls inside it"},
             },
-            "required": ["description"]
+            "required": []
         }
     },
     {
@@ -602,17 +700,23 @@ TOOL_DECLARATIONS = [
             "code reviews, features, bug fixes, refactors, tests, implementation plans, any long dev task. "
             "It uses the user's skills (superpowers: brainstorming, writing-plans, subagent-driven-development, "
             "code review...) and launches its own subagents; every step and subagent shows in OPERACIONES. "
-            "Use it, never solve_task or a claude.exe you launch yourself, for work on code. When its result "
-            "ends with a question, ask the user and call again with continue_id and the answer as task."
+            "Use it, never solve_task or a claude.exe you launch yourself, for work on code, and for any "
+            "interface to design or build (it follows the atlas-ui-director skill: real references, design "
+            "brief, screenshots, critique). When its result ends with a question, ask the user and call "
+            "again with continue_id and the answer as task. action='status' (no task) says what every "
+            "running run and each of its subagents is doing now, plus every live Claude Code session on this PC "
+            "(also ones started outside ATLAS, read from their transcripts): use it for 'cómo va', 'cómo vas', "
+            "'qué está haciendo el agente'."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "task":        {"type": "STRING", "description": "The full request in English, with the user's details and constraints"},
                 "folder":      {"type": "STRING", "description": "Project folder to work in (absolute path)"},
-                "continue_id": {"type": "STRING", "description": "id of an earlier code_agent run to continue (its answer or approval goes in task)"}
+                "continue_id": {"type": "STRING", "description": "id of an earlier code_agent run to continue (its answer or approval goes in task)"},
+                "action":      {"type": "STRING", "description": "'status': report the running runs and subagents instead of starting one"}
             },
-            "required": ["task"]
+            "required": []
         }
     },
     {
@@ -620,7 +724,10 @@ TOOL_DECLARATIONS = [
         "description": (
             "Executes complex multi-step tasks requiring multiple different tools. "
             "Examples: 'research X and save to file', 'find and organize files'. "
-            "DO NOT use for single commands. NEVER use for Steam/Epic — use game_updater."
+            "DO NOT use for single commands. NEVER use for Steam/Epic — use game_updater. "
+            "Its result starts with its outcome: only 'verified' means its outputs showed the goal reached; "
+            "report 'unverified' or 'FAILED' as such. 'BLOCKED' means it waits for the user's yes to one step: "
+            "ask, and only after a clear yes call task_status with its task_id, action='resume' and confirmed='yes'."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -634,14 +741,20 @@ TOOL_DECLARATIONS = [
     {
         "name": "task_status",
         "description": (
-            "Status and result of background agent_task jobs. With task_id: that task's status and full "
-            "result. Without: a list of all tasks. With task_id and cancel='yes': cancels that task."
+            "Status and result of background agent_task jobs. With task_id: that task's status, outcome, "
+            "plan, last steps and result. Without: a list of all tasks. With task_id and action: cancel, "
+            "pause (stops after the current action, keeps its progress) or resume (a paused, blocked or "
+            "failed task continues from its saved steps; tasks interrupted by a restart come back paused, or "
+            "blocked when an action was running: tell the user it may have happened). A BLOCKED task "
+            "waits for the user's yes to one step: only after a clear yes, resume it with confirmed='yes'."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "task_id": {"type": "STRING", "description": "ID returned by agent_task (optional)"},
-                "cancel":  {"type": "STRING", "description": "'yes' to cancel the task (optional)"}
+                "action":  {"type": "STRING", "description": "cancel | pause | resume (optional; needs task_id)"},
+                "cancel":  {"type": "STRING", "description": "'yes' to cancel the task (optional)"},
+                "confirmed": {"type": "STRING", "description": "'yes' only after the user approved the step a BLOCKED task asked about"}
             }
         }
     },
@@ -714,7 +827,7 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "flight_finder",
-        "description": "Searches Google Flights and speaks the best options.",
+        "description": "Searches Google Flights and returns the best options.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -897,7 +1010,8 @@ TOOL_DECLARATIONS = [
             "NEEDS CONFIRMATION; after a clear yes call again with confirmed='yes'. It runs in the "
             "background (several minutes), backs up the code, runs the tests and rolls back by itself if "
             "anything breaks; its result is spoken when done. action=undo: back to the code before the "
-            "last change. action=restart: reload ATLAS so a change takes effect (ask first)."
+            "last change. action=restart: reload ATLAS so a change takes effect (ask first); pass pending so the "
+            "user's standing instructions and unfinished tasks carry over."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -905,6 +1019,7 @@ TOOL_DECLARATIONS = [
                 "action":    {"type": "STRING", "description": "improve | undo | restart"},
                 "request":   {"type": "STRING", "description": "For improve: the change in detail, in English: what the user needs, how they will ask for it, examples"},
                 "confirmed": {"type": "STRING", "description": "'yes' only after the user approved this change"},
+                "pending":   {"type": "STRING", "description": "For restart: every standing instruction and unfinished task the user gave in this session, one per line (e.g. 'review the VendigMachine transcript and tell me how it is going'); saved and reloaded after the restart"},
                 "trusted":   {"type": "STRING", "description": "A saved no-confirmation case, exactly as listed, when this action clearly falls inside it"}
             },
             "required": ["action"]
@@ -954,7 +1069,7 @@ def ack_audio(make: bool = True) -> bytes:
         return path.read_bytes() if path.exists() else _ack_this_run.get(lang, b"")
     pcm = b""
     try:
-        if (get_config().get("gemini_api_key") or "").strip():
+        if voice in EDGE_VOICES or (get_config().get("gemini_api_key") or "").strip():
             pcm = asyncio.run(read_aloud(ACK[lang]))
             if pcm:
                 path.write_bytes(pcm)
@@ -963,20 +1078,14 @@ def ack_audio(make: bool = True) -> bytes:
         print(f"[ATLAS] ⚠️ ack voice (Gemini): {str(e)[:120]}")
     if not pcm:
         try:
-            import edge_tts, miniaudio
-
-            async def mp3():
-                return b"".join([c["data"] async for c in edge_tts.Communicate(
-                    ACK[lang], get_config().get("tts_voice", "es-CO-GonzaloNeural")).stream() if c["type"] == "audio"])
-            pcm = _ack_this_run[lang] = miniaudio.decode(
-                asyncio.run(mp3()), output_format=miniaudio.SampleFormat.SIGNED16,
-                nchannels=1, sample_rate=24000).samples.tobytes()
+            pcm = _ack_this_run[lang] = asyncio.run(edge_pcm(ACK[lang], get_config().get("tts_voice", "es-MX-JorgeNeural")))
         except Exception as e:
             print(f"[ATLAS] ⚠️ ack voice (edge-tts): {str(e)[:120]}")
     return pcm
 
 
 class AtlasLive:
+    _dance_end = 0.0   # "menea tu chapa" music plays until then: the mic only listens for the wake word
 
     def __init__(self, ui: AtlasUI):
         self.ui             = ui
@@ -994,11 +1103,52 @@ class AtlasLive:
         self._drop_audio    = False   # interrupted: the rest of the reply being sent is not played
         self._cancelled_calls = set() # tool calls the Live server dropped on an interruption
         self._says_name     = False   # the audio playing contains "Atlas": no voice interrupt now
+        self._speaker       = None    # speaker.Tracker of the open mic stream, if any
+        self._speaker_note  = None    # [VOICE ID] note waiting for a moment it can't cut a reply
         self.ui.on_text_command = self._on_text_command
 
+    _track_speaker = True   # the cascade engine checks each utterance itself (engines.py)
+
+    def _on_speaker(self, name, score, talking):
+        """speaker.Tracker thread: someone else is talking now. The note goes in at once only while
+        the user is mid-sentence; otherwise after ATLAS's next reply, since a note sent while the
+        model is answering would cut that answer."""
+        if not name and self._speaker and self._speaker.out:   # "speaker_only": the brain never heard it
+            return self._refuse_voice(score)
+        self.ui.write_log(f"SIS: Voz reconocida: {name} ({score:.2f})." if name
+                          else f"SIS: Voz no registrada ({score:.2f}).")
+        self._speaker_note = SPEAKER_NOTE.format(name=name) if name else SPEAKER_UNKNOWN
+        if talking and self._loop:
+            self._loop.call_soon_threadsafe(self._send_speaker_note)
+
+    _refused_at = 0.0   # when it last said it only answers enrolled voices
+
+    def _refuse_voice(self, score):
+        """'speaker_only' dropped what a voice that is not enrolled said: logged, and said out loud
+        at most once per REFUSE_EVERY s."""
+        self.ui.write_log(f"SIS: Voz no registrada ({score:.2f}): ignorada.")
+        if time.time() - self._refused_at < REFUSE_EVERY:
+            return
+        self._refused_at = time.time()
+        self._say_line(REFUSE_VOICE[_ack_lang()])
+
+    def _say_line(self, line: str):
+        """Live has no voice of its own: the brain reads the line out."""
+        self.speak(f"[VOICE ID] A voice that is not enrolled spoke and was ignored. Say exactly this and "
+                   f"nothing else, then wait: {line}")
+
+    def _send_speaker_note(self, reply_over=False):
+        if not self.session or not self._speaker_note:
+            return
+        if not reply_over and (self._is_speaking or not self._turn_done):
+            return   # sent when this reply completes
+        note, self._speaker_note = self._speaker_note, None
+        asyncio.ensure_future(self.session.send_client_content(
+            turns={"parts": [{"text": note}]}, turn_complete=False))
+
     def _occupied(self) -> bool:
-        """Talking, so only the wake word may reach the brain (the cascade engine adds: working)."""
-        return self._is_speaking
+        """Talking or dancing, so only the wake word may reach the brain (the cascade engine adds: working)."""
+        return self._is_speaking or time.time() < self._dance_end
 
     def interrupt(self):
         """Cuts ATLAS off mid-reply: the wake word heard while it talks, or a typed message.
@@ -1017,6 +1167,10 @@ class AtlasLive:
             self.audio_in_queue.put_nowait(self._fade)
         self.ui.write_log("SIS: Interrumpido.")
         self.set_speaking(False)
+        if time.time() < self._dance_end:   # "Atlas, para" also ends the party
+            self._dance_end = 0.0
+            sd.stop()
+            self.ui.dance(0)
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
@@ -1081,7 +1235,7 @@ class AtlasLive:
                     result = _honest(name, f.result())
                 except Exception as e:
                     result = f"FAILED: {type(e).__name__}: {e}"
-                self._deliver(BACKGROUND_DONE.format(name=name, result=result[:3000]))
+                self._deliver(BACKGROUND_DONE.format(name=name, result=clip(result)))
             fut.add_done_callback(_done)
             return STILL_WORKING
 
@@ -1093,11 +1247,40 @@ class AtlasLive:
         else:
             self.speak(note)
 
+    def _agent_done(self, task_id: str, result: str):
+        self._deliver(BACKGROUND_DONE.format(name=f"agent_task {task_id}", result=clip(result)))
+
+    def _dance(self) -> str:
+        """'Menea tu chapa': the chorus plays under ATLAS's voice and the reactor dances while it lasts."""
+        secs, note = 30.0, ""
+        try:
+            import miniaudio
+            pcm = np.frombuffer(miniaudio.decode_file(str(CHAPA_CLIP), output_format=miniaudio.SampleFormat.SIGNED16,
+                                                      nchannels=2, sample_rate=44100).samples, np.int16)
+            pcm = pcm.reshape(-1, 2)[:44100 * 30]
+            secs = len(pcm) / 44100
+            fade = np.minimum(1, np.linspace(secs, 0, len(pcm)) / 1.5)[:, None]   # last 1.5 s fade out
+            sd.play((pcm * fade * 0.6).astype(np.int16), 44100, device=_audio_device("output"))
+        except Exception as e:
+            note = f" There is no music ({CHAPA_CLIP.name}: {e}); mention it in a few words."
+        self._dance_end = time.time() + secs
+        self.ui.dance(secs)
+        return f"Dancing for {secs:.0f} s.{note}"
+
     def _self_improve(self, args: dict) -> str:
         from agent import self_improve as si
         action = str(args.get("action", "improve")).lower()
         if action == "restart":
+            from actions.code_agent import running
+            if running() and str(args.get("confirmed", "")).lower() != "yes":
+                # a restart kills their Claude Code runs mid-task (the new ATLAS can't resume them)
+                return (f"NOT RESTARTED: code_agent runs {', '.join(running())} are still working and a restart "
+                        "would kill them. Tell the user; restart only if they confirm (confirmed='yes').")
             import ui as ui_mod
+            try:   # standing instructions and unfinished tasks survive the restart (format_pending_for_prompt)
+                save_pending(str(args.get("pending") or ""), list(_session_requests))
+            except Exception as e:
+                print(f"[Memory] ⚠️ pending not saved: {e}")
             self.ui.write_log("SIS: Reiniciando para cargar el código nuevo...")
             ui_mod.relaunch()
             threading.Timer(1.5, os._exit, (0,)).start()
@@ -1132,10 +1315,9 @@ class AtlasLive:
         return ("Started in the background. It is NOT done yet: tell the user you are working on it; "
                 "the result will be spoken when it finishes.")
 
-    def speak_error(self, tool_name: str, error: str):
-        short = str(error)[:120]
-        self.ui.write_log(f"ERROR: {tool_name} — {short}")
-        self.speak(f"Sir, {tool_name} encountered an error. {short}")
+    def _tell(self, text: str):
+        """A tool's later news (a download done, shutting down): ATLAS says it in its own words; tools never speak."""
+        self._deliver(BACKGROUND_DONE.format(name="game_updater", result=text))
 
     def _system_text(self) -> str:
         from datetime import datetime
@@ -1164,8 +1346,19 @@ class AtlasLive:
             parts.append(trusted)
         if recent := recent_memories():
             parts.append(recent)
+        if pending := self._pending_block():
+            parts.append(pending)
         parts.append(sys_prompt)
         return "\n".join(parts)
+
+    def _pending_block(self) -> str:
+        """Pending items saved before the last restart, loaded once, for the first PENDING_TURNS prompts."""
+        if not hasattr(self, "_pending"):   # (or _boot_prompt, whichever runs first)
+            self._pending, self._pending_turns = load_pending(), PENDING_TURNS
+        if not self._pending or self._pending_turns <= 0:
+            return ""
+        self._pending_turns -= 1
+        return format_pending_for_prompt(self._pending)
 
     def _boot_prompt(self) -> str | None:
         """Hidden first message of a run: an introduction while memory knows nothing about the user,
@@ -1184,6 +1377,10 @@ class AtlasLive:
         if "--autostart" in sys.argv:
             from datetime import datetime
             return BOOT_LOGIN.format(time=datetime.now().strftime("%A %H:%M"), lang=lang)
+        if not hasattr(self, "_pending"):
+            self._pending, self._pending_turns = load_pending(), PENDING_TURNS
+        if self._pending:   # back from a restart: act on what the user left pending
+            return BOOT_RESTART.format(pending=format_pending_for_prompt(self._pending), lang=lang)
         return None
 
     def _build_config(self) -> types.LiveConnectConfig:
@@ -1264,6 +1461,14 @@ class AtlasLive:
                 r = await self._run_blocking(name, lambda: weather_action(parameters=args, player=self.ui))
                 result = _honest(name, r)
 
+            elif name == "check_updates":
+                import updater
+                from config import VERSION
+                result = _honest(name, await self._run_blocking(name, lambda: updater.summary(VERSION)))
+
+            elif name == "menea_tu_chapa":
+                result = self._dance()
+
             elif name == "capabilities":
                 from agent.executor import tool_status
                 result = _honest(name, await self._run_blocking(name, tool_status))
@@ -1305,8 +1510,7 @@ class AtlasLive:
             elif name == "file_processor":
                 if not args.get("file_path") and self.ui.current_file:
                     args["file_path"] = self.ui.current_file
-                r = await self._run_blocking(name, lambda: file_processor(parameters=args, player=self.ui, speak=self.speak)
-                )
+                r = await self._run_blocking(name, lambda: file_processor(parameters=args, player=self.ui))
                 result = _honest(name, r)
 
 
@@ -1319,8 +1523,16 @@ class AtlasLive:
                 r = await self._run_blocking(name, lambda: view_images(parameters=args, player=self.ui))
                 result = _honest(name, r)
 
+            elif name == "generate_image":
+                r = await self._run_blocking(name, lambda: generate_image(parameters=args, player=self.ui))
+                result = _honest(name, r)
+
             elif name == "computer_settings":
                 r = await self._run_blocking(name, lambda: computer_settings(parameters=args, response=None, player=self.ui))
+                result = _honest(name, r)
+
+            elif name == "windows_personalization":
+                r = await self._run_blocking(name, lambda: windows_personalization(parameters=args, player=self.ui))
                 result = _honest(name, r)
 
             elif name == "desktop_control":
@@ -1328,11 +1540,11 @@ class AtlasLive:
                 result = _honest(name, r)
 
             elif name == "code_helper":
-                r = await self._run_blocking(name, lambda: code_helper(parameters=args, player=self.ui, speak=self.speak))
+                r = await self._run_blocking(name, lambda: code_helper(parameters=args, player=self.ui))
                 result = _honest(name, r)
 
             elif name == "dev_agent":
-                r = await self._run_blocking(name, lambda: dev_agent(parameters=args, player=self.ui, speak=self.speak))
+                r = await self._run_blocking(name, lambda: dev_agent(parameters=args, player=self.ui))
                 result = _honest(name, r)
 
             elif name == "code_agent":
@@ -1343,17 +1555,17 @@ class AtlasLive:
                 priority_map = {"low": TaskPriority.LOW, "normal": TaskPriority.NORMAL, "high": TaskPriority.HIGH}
                 priority = priority_map.get(args.get("priority", "normal").lower(), TaskPriority.NORMAL)
                 get_queue().on_change = self.ui.set_job   # HUD: background ops list
-                task_id  = get_queue().submit(goal=args.get("goal", ""), priority=priority, speak=self.speak)
-                result   = (f"Task queued (ID: {task_id}). It is NOT done yet. Its result will be spoken when it "
+                task_id  = get_queue().submit(goal=args.get("goal", ""), priority=priority, on_complete=self._agent_done)
+                result   = (f"Task queued (ID: {task_id}). It is NOT done yet. Its result will reach you when it "
                             f"finishes; call task_status with task_id='{task_id}' to read it.")
 
             elif name == "solve_task":
-                from agent.executor import solve_task, NeedsConfirmation
+                from agent.executor import solve_task, NeedsConfirmation, UseNativeTool
                 try:
                     result = await self._run_blocking(name, lambda: solve_task(
                         args.get("goal", ""), confirmed=args.get("confirmed", "").lower() == "yes",
                         trusted=bool(args.get("_trusted"))))
-                except NeedsConfirmation as e:
+                except (NeedsConfirmation, UseNativeTool) as e:   # not failures: the brain asks or uses the tool
                     result = str(e)
 
             elif name == "web_search":
@@ -1365,7 +1577,7 @@ class AtlasLive:
                 result = _honest(name, r)
 
             elif name == "game_updater":
-                r = await self._run_blocking(name, lambda: game_updater(parameters=args, player=self.ui, speak=self.speak))
+                r = await self._run_blocking(name, lambda: game_updater(parameters=args, player=self.ui, speak=self._tell))
                 result = _honest(name, r)
 
             elif name == "flight_finder":
@@ -1375,8 +1587,18 @@ class AtlasLive:
             elif name == "task_status":
                 from agent.task_queue import get_queue
                 q, tid = get_queue(), args.get("task_id", "").strip()
-                if tid and args.get("cancel", "").lower() == "yes":
+                action = str(args.get("action", "")).lower()
+                if tid and (action == "cancel" or args.get("cancel", "").lower() == "yes"):
                     result = f"Task {tid} cancelled." if q.cancel(tid) else f"FAILED: task {tid} could not be cancelled (unknown or already finished)."
+                elif tid and action == "pause":
+                    result = (f"Task {tid} pauses after its current action; resume it later." if q.pause(tid)
+                              else f"FAILED: task {tid} could not be paused (unknown or not queued/running).")
+                elif tid and action == "resume":
+                    q.on_change = self.ui.set_job
+                    result = (f"Task {tid} resumed from its saved steps. It is NOT done yet; its result will reach you."
+                              if q.resume(tid, on_complete=self._agent_done,
+                                          approve=str(args.get("confirmed", "")).lower() == "yes")
+                              else f"FAILED: task {tid} could not be resumed (only paused, blocked or failed tasks can).")
                 elif tid:
                     st = q.get_status(tid)
                     result = json.dumps(st, ensure_ascii=False, default=str)[:3000] if st else f"FAILED: no task with ID {tid}."
@@ -1423,7 +1645,7 @@ class AtlasLive:
 
         return types.FunctionResponse(
             id=fc.id, name=name,
-            response={"result": result}
+            response={"result": clip(str(result))}
         )
 
     async def _send_realtime(self):
@@ -1449,17 +1671,34 @@ class AtlasLive:
     async def _listen_audio(self):
         print("[ATLAS] 🎤 Mic started")
         loop = asyncio.get_event_loop()
+        try:
+            cfg = get_config()
+        except Exception:
+            cfg = {}
         if self._wake is None:
             from wakeword import make_gate
-            try:
-                cfg = get_config()
-            except Exception:
-                cfg = {}
             self._wake = make_gate(cfg, self.ui.write_log)
             self._barge = BargeIn(cfg)
         voiced = VoiceGate()   # the user is talking: the wake window runs from their last word
 
+        def push(data):
+            loop.call_soon_threadsafe(_push_drop_oldest, self.out_queue, {"data": data, "mime_type": "audio/pcm"})
+
+        import speaker
+        self._speaker = self._track_speaker and speaker.make_tracker(
+            self._on_speaker, VoiceGate(), cfg, self.ui.write_log, out=push if cfg.get("speaker_only") else None)
+        hold = bool(self._speaker and self._speaker.out)
+
+        def send(data):
+            if hold:   # "speaker_only": the tracker passes on only what enrolled voices say
+                return self._speaker.feed(data)
+            push(data)
+            if self._speaker:
+                self._speaker.feed(data)
+
         def callback(indata, frames, time_info, status):
+            if speaker.recording.is_set():
+                return   # Settings is recording a voice sample: it is not a request
             if self._occupied() and self._wake and not self.ui.muted and not self._says_name:
                 # Only the wake word gets through while ATLAS talks: it interrupts it, and the
                 # utterance that had it ("Atlas, para", "Atlas, abre Chrome") is the new request.
@@ -1468,8 +1707,7 @@ class AtlasLive:
                 if heard and self._barge.allows(heard):
                     self.interrupt()
                     for data in heard:
-                        loop.call_soon_threadsafe(_push_drop_oldest, self.out_queue,
-                                                  {"data": data, "mime_type": "audio/pcm"})
+                        send(data)
                 elif heard:   # its own voice through the speakers, most likely: neither stop nor send it
                     print(f"[ATLAS] 🔇 wake word under the echo ignored (barge_in={self._barge.mode})")
             elif not self._occupied() and not self.ui.muted:
@@ -1481,10 +1719,7 @@ class AtlasLive:
                         self._wake_state = state
                         self.ui.set_state(state)
                 for data in chunks:
-                    loop.call_soon_threadsafe(
-                        _push_drop_oldest, self.out_queue,
-                        {"data": data, "mime_type": "audio/pcm"}
-                    )
+                    send(data)
 
         try:
             with sd.InputStream(
@@ -1501,6 +1736,9 @@ class AtlasLive:
         except Exception as e:
             print(f"[ATLAS] ❌ Mic: {e}")
             raise
+        finally:
+            if self._speaker:
+                self._speaker.stop()
 
     async def _answer_tools(self, calls):
         try:
@@ -1570,6 +1808,7 @@ class AtlasLive:
                             self._drop_audio = self._says_name = False
                             if self.audio_in_queue.empty():
                                 self.set_speaking(False)
+                            self._send_speaker_note(reply_over=True)
 
                             full_in = " ".join(in_buf).strip()
                             if full_in:
@@ -1735,11 +1974,7 @@ def _update_watch(ui):
     import updater
     from config import VERSION
     while True:
-        try:
-            repo = get_config().get("update_repo", updater.REPO)
-        except Exception:
-            repo = updater.REPO
-        msg = updater.check(VERSION, repo)
+        msg = updater.check(VERSION, updater.repo())
         if msg.startswith("Actualización disponible"):
             ui.write_log(f"SIS: {msg}")
         if tools := updater.check_tools():
@@ -1792,6 +2027,8 @@ async def _run_until_saved(ui, atlas):
 
 
 def main():
+    # With the default hook PyQt aborts the whole app (no traceback) on an error inside a Qt callback.
+    sys.excepthook = lambda *exc: traceback.print_exception(*exc)
     ui = AtlasUI("face.png")
 
     def runner():
@@ -1830,7 +2067,7 @@ def main():
                 return
             except Exception as e:   # a dead engine left the window open but deaf and mute: build a new one
                 traceback.print_exc()
-                ui.write_log(f"ERROR: El motor se detuvo ({str(e)[:120]}). Reiniciando el motor...")
+                ui.write_log(f"ERROR: El motor se detuvo ({str(e)[:120] or type(e).__name__}). Reiniciando el motor...")
                 time.sleep(3)
             try:
                 if close := getattr(getattr(atlas, "llm", None), "close", None):
@@ -1843,4 +2080,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()

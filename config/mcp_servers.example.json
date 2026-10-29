@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "context7": {
+      "enabled": false,
+      "url": "https://mcp.context7.com/mcp",
+      "allowed_tools": ["resolve-library-id", "query-docs", "get-library-docs"]
+    },
+    "context7-local": {
+      "enabled": false,
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp"],
+      "allowed_tools": ["resolve-library-id", "query-docs", "get-library-docs"]
+    }
+  }
+}

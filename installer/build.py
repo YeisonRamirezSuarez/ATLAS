@@ -21,12 +21,15 @@ OUT  = DIST / "Atlas"
 OS   = platform.system()          # Windows | Darwin | Linux
 ENGRAM_VERSION = "3.6.0"
 VOSK_MODEL     = "vosk-model-small-es-0.42"   # wake word; must match wakeword.DEFAULT_MODEL
+SPK_MODEL      = "vosk-model-spk-0.4"         # who is talking; must match speaker.SPK_MODEL
 sys.path.insert(0, str(ROOT))
 from config import VERSION   # noqa: E402  single version source
 SKIP_DIRS  = {".venv", ".git", ".github", ".claude", ".superpowers", "dist", "build", "installer", "__pycache__", "backups",
-              "skills"}   # memory/skills: scripts this PC's Atlas learned
-SKIP_FILES = {"api_keys.json", "long_term.json", "atlas.log", "Atlas.exe", "launcher.cs",
+              "skills",   # memory/skills: scripts this PC's Atlas learned
+              "voices"}   # memory/voices: recordings of this PC's users
+SKIP_FILES = {"api_keys.json", "long_term.json", "voices.json", "atlas.log", "Atlas.exe", "launcher.cs",
               "jarvis.log", "Jarvis.exe", "jarvis_id.session",   # same, from before 2.5.0
+              "CLAUDE.md",                                       # developer notes, not for the installed app
               "atlas_id.session", "sync.db",                    # the developer's ATLAS ID login and sync queue
               "telegram.session", "telegram.session-journal",   # the developer's Telegram login
               "msal_cache.bin",                                  # the developer's Microsoft login
@@ -71,24 +74,25 @@ def bundle():
     if not (app / "bin" / exe).is_file():
         fetch_engram(app / "bin")
 
-    # 6. Vosk Spanish model for the local wake word (~40 MB); models/ was copied if present.
-    if not (app / "models" / VOSK_MODEL).is_dir():
-        fetch_vosk_model(app / "models")
+    # 6. Vosk models (~40 MB wake word, ~13 MB speaker vectors); models/ was copied if present.
+    for model in (VOSK_MODEL, SPK_MODEL):
+        if not (app / "models" / model).is_dir():
+            fetch_vosk_model(app / "models", model)
 
 
-def fetch_vosk_model(dst):
-    """Downloads and unpacks the Vosk wake word model over HTTPS."""
+def fetch_vosk_model(dst, model):
+    """Downloads and unpacks a Vosk model over HTTPS."""
     # ponytail: alphacephei publishes no checksums; pin a sha256 here once one is recorded.
     import io, urllib.request, zipfile
-    print("+ download", VOSK_MODEL, flush=True)
-    data = urllib.request.urlopen(f"https://alphacephei.com/vosk/models/{VOSK_MODEL}.zip").read()
+    print("+ download", model, flush=True)
+    data = urllib.request.urlopen(f"https://alphacephei.com/vosk/models/{model}.zip").read()
     zf = zipfile.ZipFile(io.BytesIO(data))
     if any(n.startswith(("/", "..")) or ".." in Path(n).parts for n in zf.namelist()):
-        sys.exit(f"Unsafe paths in {VOSK_MODEL}.zip")
+        sys.exit(f"Unsafe paths in {model}.zip")
     dst.mkdir(exist_ok=True)
     zf.extractall(dst)
-    if not (dst / VOSK_MODEL).is_dir():
-        sys.exit(f"{VOSK_MODEL}.zip did not contain {VOSK_MODEL}/")
+    if not (dst / model).is_dir():
+        sys.exit(f"{model}.zip did not contain {model}/")
 
 
 def fetch_engram(dst):

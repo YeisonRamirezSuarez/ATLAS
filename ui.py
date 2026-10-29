@@ -13,17 +13,18 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import psutil
 
 import autostart
 from config import PROVIDERS, VERSION, get_effort
 
 from PyQt6.QtCore import (
-    QEasingCurve, QMimeData, QObject, QPointF, QRectF, QSize, Qt, QVariantAnimation,
+    QBuffer, QEasingCurve, QEvent, QIODevice, QMimeData, QObject, QPointF, QRectF, QSize, Qt, QVariantAnimation,
     QMetaObject, QTimer, QUrl, pyqtProperty, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
+    QBrush, QColor, QConicalGradient, QDesktopServices, QDragEnterEvent, QDropEvent, QFont,
     QFontDatabase, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap, QPolygonF, QRadialGradient, QShortcut,
 )
@@ -176,6 +177,7 @@ class _SysMetrics:
         self._last_net_t = time.time()
         self._running = True
         self._wmi_temp = True
+        self._nvml = None   # NVIDIA utilization reader, set up on the first pass; False = no NVIDIA driver
         t = threading.Thread(target=self._loop, daemon=True)
         t.start()
 
@@ -185,7 +187,7 @@ class _SysMetrics:
                 self._update()
             except Exception:
                 pass
-            time.sleep(1.5)
+            time.sleep(2)   # the panel reads it every 2 s
 
     def _update(self):
         cpu = psutil.cpu_percent(interval=None)
@@ -214,13 +216,35 @@ class _SysMetrics:
             self.gpu = gpu
             self.tmp = tmp
 
+    @staticmethod
+    def _open_nvml():
+        """NVIDIA utilization straight from the driver library: about 0.3 ms a read, where starting
+        nvidia-smi costs about 80 ms every pass. None when there is no NVIDIA driver."""
+        import ctypes
+
+        class Use(ctypes.Structure):
+            _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+        try:
+            lib = ctypes.CDLL("nvml.dll" if _OS == "Windows" else "libnvidia-ml.so.1")
+            dev = ctypes.c_void_p()
+            if lib.nvmlInit_v2() or lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev)):
+                return None
+        except OSError:
+            return None
+        use = Use()
+        return lambda: float(use.gpu) if lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(use)) == 0 else -1.0
+
     def _get_gpu(self) -> float:
-        # NVIDIA
+        if self._nvml is None:
+            self._nvml = self._open_nvml() or False
+        if self._nvml:
+            return self._nvml()
+        # NVIDIA without the library on the path
         try:
             r = subprocess.run(
                 ["nvidia-smi", "--query-gpu=utilization.gpu",
                  "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=2
+                capture_output=True, text=True, timeout=2, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
             )
             if r.returncode == 0:
                 vals = [float(v.strip()) for v in r.stdout.strip().split("\n") if v.strip()]
@@ -314,7 +338,7 @@ class _SysMetrics:
                 r = subprocess.run(
                     ["powershell", "-Command",
                      "(Get-WmiObject MSAcpi_ThermalZoneTemperature -Namespace root/wmi).CurrentTemperature"],
-                    capture_output=True, text=True, timeout=3
+                    capture_output=True, text=True, timeout=3, creationflags=subprocess.CREATE_NO_WINDOW
                 )
                 if r.returncode == 0 and r.stdout.strip():
                     raw = float(r.stdout.strip().split("\n")[0])
@@ -347,7 +371,7 @@ def _chamfer(r: QRectF, c: float) -> QPolygonF:
 
 # Tool -> HUD task animation. Unknown tools fall back to "system".
 TASK_MODES = {
-    "apple_music": "media", "youtube_video": "media",
+    "apple_music": "media", "youtube_video": "media", "menea_tu_chapa": "media",
     "code_helper": "code", "dev_agent": "code", "code_agent": "code", "solve_task": "code", "agent_task": "code", "task_status": "code",
     "web_search": "net", "browser_control": "net", "flight_finder": "net", "weather_report": "net",
     "screen_process": "scan",
@@ -503,6 +527,7 @@ class HudCanvas(QWidget):
         self._spec       = [0.0] * 48       # media spectrum bars
         self._jobs: dict[str, list] = {}    # background job id -> [goal, step, started]
         self._err_until  = 0.0              # core shows the error state (amber) until then
+        self._dance_end  = 0.0              # "menea tu chapa": the reactor dances until then
 
         self._bridge = HudBridge()
         self._static_key, self._static_file, self._static_n = None, None, 0
@@ -628,6 +653,8 @@ class HudCanvas(QWidget):
             self._jobs[key] = [goal, step, self._jobs.get(key, [0, 0, time.time()])[2]]
 
     def _step(self):
+        if self.window().isMinimized():   # nothing to draw: skip the 60 per second animation work
+            return
         # f: this tick in 60 fps frames. Timer ticks are uneven (15..31 ms on Windows), so every
         # increment and every easing is scaled by it, else the motion stutters.
         t = time.perf_counter()
@@ -635,6 +662,7 @@ class HudCanvas(QWidget):
         self._t_prev = t
         ease = lambda k: 1 - (1 - k) ** f
         self._tick += f
+        hot = self.speaking or time.time() < self._dance_end   # dancing looks as lively as talking
         on = self._task is not None and (self._task_end is None or time.time() < self._task_end)
         self._task_a += ((1.0 if on else 0.0) - self._task_a) * ease(0.12)
         if not on and self._task_a < 0.02:
@@ -657,8 +685,8 @@ class HudCanvas(QWidget):
             self._push()
             return
         now = time.time()
-        if now - self._last_t > (0.12 if self.speaking else 0.5):
-            if self.speaking:
+        if now - self._last_t > (0.12 if hot else 0.5):
+            if hot:
                 self._tgt_scale = random.uniform(1.03, 1.07)
                 self._tgt_halo  = random.uniform(145, 190)
             elif self.muted:
@@ -669,24 +697,26 @@ class HudCanvas(QWidget):
                 self._tgt_halo  = random.uniform(48, 68)
             self._last_t = now
 
-        sp = ease(0.38 if self.speaking else 0.15)
+        sp = ease(0.38 if hot else 0.15)
         self._scale += (self._tgt_scale - self._scale) * sp
         self._halo  += (self._tgt_halo  - self._halo)  * sp
 
-        speeds = [1.1, -0.7, 0.35] if self.speaking else [0.4, -0.25, 0.12]
+        speeds = [1.1, -0.7, 0.35] if hot else [0.4, -0.25, 0.12]
         for i, spd in enumerate(speeds):
             self._rings[i] = (self._rings[i] + spd * f) % 360
-        self._scan = (self._scan - (3.0 if self.speaking else 1.2) * f) % 360
+        self._scan = (self._scan - (3.0 if hot else 1.2) * f) % 360
 
         fw  = min(self.width(), self.height())
         lim = fw * 0.5
-        spd = (3.6 if self.speaking else 1.6) * f
+        spd = (3.6 if hot else 1.6) * f
         self._pulses = [r + spd for r in self._pulses if r + spd < lim]
-        if len(self._pulses) < 3 and random.random() < (0.06 if self.speaking else 0.02) * f:
+        if len(self._pulses) < 3 and random.random() < (0.06 if hot else 0.02) * f:
             self._pulses.append(fw * 0.12)
 
         for i in range(len(self._wave)):
-            if self.muted:
+            if hot:
+                tgt = random.uniform(0.15, 1.0) * (1 - abs(i - 19.5) / 26)
+            elif self.muted:
                 tgt = 0.05
             elif self.speaking:
                 tgt = random.uniform(0.15, 1.0) * (1 - abs(i - 19.5) / 26)
@@ -694,7 +724,7 @@ class HudCanvas(QWidget):
                 tgt = 0.12 + 0.08 * math.sin(self._tick * 0.08 + i * 0.5)
             self._wave[i] += (tgt - self._wave[i]) * ease(0.35)
 
-        if self.speaking and random.random() < 0.3:
+        if hot and random.random() < 0.3:
             cx, cy = self.width() / 2, self.height() / 2
             ang = random.uniform(0, 2 * math.pi)
             r_s = fw * 0.2
@@ -1771,6 +1801,35 @@ def audio_devices(kind: str) -> list[str]:
         return []
 
 
+# Settings > VOCES: what the user reads while a voice sample is recorded (about REC_SECONDS aloud).
+REC_SECONDS = 20
+READ_ALOUD = ("El sol de la mañana entra por la ventana mientras preparo un café. Hoy quiero ordenar mis "
+              "pendientes, revisar el correo y escuchar algo de música. Por la tarde llamaré a mi familia y, "
+              "si el clima ayuda, saldré a caminar un buen rato por el parque.")
+
+
+def device_index(name: str, kind: str):
+    """sounddevice index of a device picked in SONIDO (saved by name); None = system default."""
+    try:
+        import sounddevice as sd
+        api = sd.default.hostapi
+        return next((i for i, d in enumerate(sd.query_devices()) if name and d["name"] == name
+                     and d["hostapi"] == api and d[f"max_{kind}_channels"]), None)
+    except Exception:
+        return None
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def _quality(q) -> str:
+    """Quality of a voice sample (speaker.assess) in words."""
+    if q is None:
+        return "Calidad sin medir"
+    return f"Calidad {'buena' if q >= 0.7 else 'regular' if q >= 0.4 else 'baja'} ({q:.0%})"
+
+
 class Toggle(QCheckBox):
     """QCheckBox painted as a switch, or as a small box with a check (box=True) where room is tight.
     The stock indicator showed a bare check when on and nothing at all when off."""
@@ -1986,15 +2045,19 @@ def _expander(lay, sub: str, body: QWidget) -> QPushButton:
 
 
 class SettingsOverlay(QWidget):
-    """Settings in four tabs: GENERAL (theme, sound, startup), AI ENGINE (engine and keys), ACCOUNT
-    (ATLAS ID and shared memory) and MEMORIA (PIN, then the 3D view of what ATLAS knows).
-    Shown at first boot and from the CONFIG button."""
+    """Settings in six tabs: GENERAL (theme, sound, startup), VOCES (who is talking), MOTOR IA (engine and
+    keys), CUENTA (ATLAS ID and shared memory), MEMORIA (PIN, then the 3D view of what ATLAS knows) and
+    ACERCA DE (version, updates, credits). Shown at first boot and from the CONFIG button."""
     done        = pyqtSignal(dict)
     cancelled   = pyqtSignal()
     open_memory = pyqtSignal()
     _id_done  = pyqtSignal(str, object)   # ATLAS ID work finished in a thread: (what, result or exception)
-    # The ACCOUNT tab writes api_keys.json directly; SAVE & START keeps these from disk, not from the copy opened here.
-    _ID_KEYS  = ("supabase_url", "supabase_anon_key", "device_name", "memory_sync", "device_id")
+    _voice_done = pyqtSignal(object)      # voice sample recorded: (name, sample count) or exception
+    _upd_done = pyqtSignal(str)           # update check finished: updater.summary text
+    # The ACCOUNT tab and the IPHONE switches write api_keys.json directly; SAVE & START keeps these from disk,
+    # not from the copy opened here.
+    _ID_KEYS  = ("supabase_url", "supabase_anon_key", "device_name", "memory_sync", "device_id",
+                 "phone_push", "phone_mail", "phone_siri")
 
     def __init__(self, cfg: dict, can_cancel: bool, parent=None):
         super().__init__(parent)
@@ -2022,12 +2085,6 @@ class SettingsOverlay(QWidget):
             QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{
                 height: 0; background: none;
             }}
-            QPushButton#tab {{
-                background: transparent; color: {C.TEXT_DIM};
-                border: none; border-bottom: 2px solid transparent; padding: 6px 0 7px;
-            }}
-            QPushButton#tab:hover {{ color: {C.TEXT_MED}; }}
-            QPushButton#tab:checked {{ color: {C.PRI}; border-bottom: 2px solid {C.PRI}; }}
             QPushButton#outline {{
                 background: transparent; color: {C.PRI};
                 border: 1px solid {C.PRI_DIM}; border-radius: 5px; padding: 0 14px;
@@ -2070,15 +2127,13 @@ class SettingsOverlay(QWidget):
         pages = QStackedWidget()
         root.addWidget(pages, 1)
         tabs = QButtonGroup(self)
-        for i, (icon, name, build) in enumerate((("⚙", "GENERAL", self._build_general),
-                                                 ("◈", "MOTOR IA", self._build_ai),
-                                                 ("☁", "CUENTA", self._build_account),
-                                                 ("◉", "MEMORIA", self._build_memory))):
-            b = QPushButton(f"{icon}\n{name}")
-            b.setObjectName("tab")
-            b.setCheckable(True)
-            b.setFont(QFont(_FONT, 8))
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
+        for i, (glyph, name, build) in enumerate((("sliders", "GENERAL", self._build_general),
+                                                  ("voice", "VOCES", self._build_voices),
+                                                  ("chip", "MOTOR IA", self._build_ai),
+                                                  ("user", "CUENTA", self._build_account),
+                                                  ("memory", "MEMORIA", self._build_memory),
+                                                  ("info", "ACERCA DE", self._build_about))):
+            b = TabButton(glyph, name)
             tabs.addButton(b, i)
             bar.addWidget(b)
             page = QWidget()
@@ -2156,14 +2211,16 @@ class SettingsOverlay(QWidget):
         lay.addLayout(row)
 
         # Every change plays a short sample; saved with GUARDAR like the devices.
-        from voice import VOICE_NAME, VOICES
+        from voice import EDGE_VOICES, VOICE_NAME, VOICES
         _section(lay, "VOZ")
         row = QHBoxLayout()
         row.setSpacing(10)
         self._voice, self._speed = QComboBox(), QComboBox()
         for v in VOICES:
             self._voice.addItem(f"{v} (ATLAS)" if v == VOICE_NAME else v, v)
-        for k, label in (("lenta", "Lenta"), ("normal", "Normal"), ("rapida", "Rápida")):
+        for v, label in EDGE_VOICES.items():   # free, no quota, steady tone
+            self._voice.addItem(f"{label} · sin límite", v)
+        for k, label in (("lenta", "Lenta"), ("normal", "Normal"), ("rapida", "Rápida"), ("muy_rapida", "Muy rápida")):
             self._speed.addItem(label, k)
         self._voice.setCurrentIndex(max(0, self._voice.findData(cfg.get("voice_name") or VOICE_NAME)))
         self._speed.setCurrentIndex(max(0, self._speed.findData(cfg.get("voice_speed") or "normal")))
@@ -2186,12 +2243,15 @@ class SettingsOverlay(QWidget):
             col.addWidget(w)
             row.addLayout(col, 1)
         self._volume.sliderReleased.connect(self._preview_voice)
+        # Moving through the open list plays each voice too, once the pointer rests on one for a moment.
+        self._hover = QTimer(self, singleShot=True, interval=350, timeout=self._preview_voice)
+        self._voice.highlighted.connect(lambda i: (setattr(self, "_hovered", i), self._hover.start()))
         lay.addLayout(row)
         reset = QHBoxLayout()
         reset.addStretch(1)
         reset.addWidget(_button("Restaurar voz de ATLAS", "link", self._default_voice))
         lay.addLayout(reset)
-        self._samples, self._sample_id = {}, 0
+        self._samples, self._sample_id, self._hovered = {}, 0, 0
 
         # Applied on toggle: the login entry lives in the OS, not in api_keys.json.
         _section(lay, "INICIO")
@@ -2200,6 +2260,19 @@ class SettingsOverlay(QWidget):
         self._autostart.toggled.connect(self._set_autostart)
         lay.addWidget(_toggle_row(self._autostart, "Iniciar con Windows" if _OS == "Windows" else "Iniciar al iniciar sesión",
                                   "Abre ATLAS al iniciar sesión."))
+
+        # Applied on toggle; phone_bridge reads them on each message, so no restart.
+        _section(lay, "IPHONE")
+        self._phone_sw = {}
+        for key, title, sub in (
+            ("phone_push", "Notificaciones ntfy", "Lo que dice ATLAS llega al iPhone como notificación, con su voz."),
+            ("phone_mail", "Correo", "Lo que dice ATLAS llega también por correo, para que el iPhone lo lea en voz alta."),
+            ("phone_siri", "Siri", "ATLAS responde lo que le preguntas desde el atajo de Siri."),
+        ):
+            box = self._phone_sw[key] = Toggle()
+            box.setChecked(cfg.get(key, True))
+            box.toggled.connect(lambda on, k=key, b=box: self._set_phone(k, on, b))
+            lay.addWidget(_toggle_row(box, title, sub))
 
     def _default_voice(self):
         from voice import VOICE_NAME
@@ -2213,8 +2286,12 @@ class SettingsOverlay(QWidget):
         self._preview_voice()
 
     def _preview_voice(self, *_):
-        """Says a sample line with the picked voice, speed and volume (Gemini Live, cached per voice and speed)."""
-        voice, speed, gain = self._voice.currentData(), self._speed.currentData(), self._volume.value() / 100
+        """Says a sample line with the picked (or hovered) voice, speed and volume, cached per voice and speed."""
+        self._hover.stop()
+        open_list = self._voice.view().isVisible()
+        voice = self._voice.itemData(self._hovered) if open_list else self._voice.currentData()
+        speed, gain = self._speed.currentData(), self._volume.value() / 100
+        out = device_index(self._audio["output"].currentData(), "output")   # the speaker picked in SONIDO
         self._sample_id += 1
         me = self._sample_id
 
@@ -2229,7 +2306,7 @@ class SettingsOverlay(QWidget):
                     pcm = self._samples[voice, speed] = asyncio.run(
                         read_aloud("Todos los sistemas en línea. ¿En qué puedo ayudarte?", voice, PACES[speed]))
                 if me == self._sample_id:   # a newer change already asked for its own sample
-                    sd.play((np.frombuffer(pcm, np.int16) * gain).astype(np.int16), 24000)
+                    sd.play((np.frombuffer(pcm, np.int16) * gain).astype(np.int16), 24000, device=out)
             except Exception as e:   # no Gemini key yet, offline
                 print(f"[Settings] Voice preview failed: {e}")
         threading.Thread(target=run, daemon=True).start()
@@ -2238,7 +2315,227 @@ class SettingsOverlay(QWidget):
         self._theme = name
         switch_theme(name)
 
-    # ── AI ENGINE tab ─────────────────────────────────────────────────────────
+    # ── VOCES tab ────────────────────────────────────────────────────────────
+    # Samples are saved or deleted on the spot; "solo voces registradas" with GUARDAR.
+
+    def _build_voices(self, cfg, lay):
+        _section(lay, "VOCES REGISTRADAS", first=True)
+        lay.addWidget(_text("ATLAS reconoce quién le habla y lo llama por su nombre. Más grabaciones de "
+                            "la misma persona, mejor reconocimiento.", 8, C.TEXT_DIM, wrap=True))
+        lay.addSpacing(4)
+        self._voice_list = QVBoxLayout()
+        self._voice_list.setSpacing(6)
+        lay.addLayout(self._voice_list)
+        lay.addSpacing(4)
+        self._only = Toggle()
+        self._only.setChecked(bool(cfg.get("speaker_only")))
+        lay.addWidget(_toggle_row(self._only, "Responder solo a voces registradas",
+                                  "Apagado: responde a todos y reconoce quién habla. Se aplica al GUARDAR."))
+
+        _section(lay, "NUEVA GRABACIÓN")
+        lay.addWidget(_text(f"Pulsa GRABAR y lee el texto en voz alta ({REC_SECONDS} s) con tu tono normal, "
+                            "en el micrófono elegido en GENERAL.", 8, C.TEXT_DIM, wrap=True))
+        self._rec = _button("●  GRABAR", "outline", self._record_voice, 34)
+        lay.addWidget(self._rec)
+        self._read = _text(f"«{READ_ALOUD}»", 10, C.TEXT, wrap=True)
+        self._read.hide()
+        lay.addWidget(self._read)
+
+        # The last recording, until it is saved under a name or discarded.
+        self._take_box = QFrame()
+        self._take_box.setObjectName("card")
+        box = QVBoxLayout(self._take_box)
+        box.setContentsMargins(12, 10, 12, 10)
+        box.setSpacing(8)
+        self._take_info = _text("", 9, C.TEXT, wrap=True)
+        box.addWidget(self._take_info)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self._take_name = QComboBox()
+        self._take_name.setEditable(True)
+        self._take_name.setFont(QFont(_FONT, 10))
+        self._take_name.setFixedHeight(32)
+        self._take_name.lineEdit().setPlaceholderText("Nombre de la persona")
+        self._take_name.lineEdit().setMaxLength(30)
+        row.addWidget(_button("▶  Escuchar", "link", lambda: self._play_voice(self._take["pcm"])))
+        row.addWidget(self._take_name, 1)
+        row.addWidget(_button("GUARDAR VOZ", "primary", self._save_take, 32))
+        row.addWidget(_button("Descartar", "danger", self._discard_take))
+        box.addLayout(row)
+        self._take_box.hide()
+        lay.addWidget(self._take_box)
+        self._voice_msg = _text("", 9, C.TEXT_MED, wrap=True)
+        lay.addWidget(self._voice_msg)
+
+        self._take, self._rec_left, self._recording, self._rec_cancel = None, 0, False, False
+        self._rec_tmr = QTimer(self)
+        self._rec_tmr.timeout.connect(self._rec_tick)
+        self._voice_done.connect(self._voice_result)
+        self._refresh_voices()
+
+    def _voice_say(self, txt: str, error: bool = False):
+        self._voice_msg.setStyleSheet(f"color: {C.RED if error else C.TEXT_MED};")
+        self._voice_msg.setText(txt)
+
+    def _refresh_voices(self):
+        import speaker
+        while self._voice_list.count():
+            self._voice_list.takeAt(0).widget().deleteLater()
+        voices = speaker.load()
+        profs = speaker.profiles(voices)
+        if not voices:
+            self._voice_list.addWidget(_text("Aún no hay voces registradas.", 9, C.TEXT_DIM))
+        for name, samples in voices.items():
+            card = QFrame()
+            card.setObjectName("card")
+            col = QVBoxLayout(card)
+            col.setContentsMargins(12, 8, 12, 8)
+            col.setSpacing(2)
+            row = QHBoxLayout()
+            row.addWidget(_text(name, 10, bold=True))
+            row.addWidget(_text(_plural(len(samples), "grabación", "grabaciones"), 8, C.TEXT_DIM), 1)
+            row.addWidget(_button("Borrar voz", "danger", lambda _, n=name: self._delete_voice(n)))
+            col.addLayout(row)
+            for i, s in enumerate(samples):
+                row = QHBoxLayout()
+                row.addWidget(_text(f"Grabación {i + 1}", 9, C.TEXT_MED))
+                # How close this sample is to the voice it belongs to: a stray one shows up low.
+                fit = (f"   ·   coincide {float(np.dot(speaker._unit(s['vec']), profs[name])):.0%}"
+                       if len(samples) > 1 else "")
+                row.addWidget(_text(_quality(s.get("quality")) + fit, 8, C.TEXT_DIM), 1)
+                if f := speaker.audio(s):
+                    row.addWidget(_button("▶  Escuchar", "link", lambda _, f=f: self._play_voice(f)))
+                row.addWidget(_button("Borrar", "danger", lambda _, n=name, i=i: self._delete_voice(n, i)))
+                col.addLayout(row)
+            self._voice_list.addWidget(card)
+        typed = self._take_name.currentText()
+        self._take_name.clear()
+        self._take_name.addItems(list(voices))
+        self._take_name.setEditText(typed)
+        ok = speaker.available()
+        self._rec.setEnabled(ok and (not self._recording or self._rec_left > 0))
+        if not ok:
+            self._voice_say("Falta el modelo de voces (models/vosk-model-spk-0.4): reinstala ATLAS.", True)
+        # No voice to tell apart: the switch would leave ATLAS answering nobody.
+        self._only.setEnabled(ok and bool(voices))
+        if not (ok and voices):
+            self._only.setChecked(False)
+
+    def _delete_voice(self, name: str, index: int | None = None):
+        import speaker
+        speaker.remove(name, index=index)
+        self._voice_say(f"Voz de {name} borrada." if index is None else f"Grabación {index + 1} de {name} borrada.")
+        self._refresh_voices()
+
+    def _play_voice(self, src):
+        """A saved sample (its .wav) or the recording not saved yet (pcm), on the speaker picked in SONIDO."""
+        import wave
+        import sounddevice as sd
+        try:
+            if not isinstance(src, bytes):
+                with wave.open(str(src), "rb") as w:
+                    src = w.readframes(w.getnframes())
+            sd.play(np.frombuffer(src, np.int16), 16000,
+                    device=device_index(self._audio["output"].currentData(), "output"))
+        except Exception as e:
+            self._voice_say(f"No se pudo reproducir: {e}", True)
+
+    def _record_voice(self):
+        if self._recording:   # the button reads CANCELAR while recording
+            import sounddevice as sd
+            self._rec_cancel = True
+            sd.stop()
+            return
+        dev = device_index(self._audio["input"].currentData(), "input")
+        self._take, self._rec_cancel = None, False
+        self._take_box.hide()
+        self._rec_left, self._recording = REC_SECONDS, True
+        self._read.show()
+        self._voice_say("")
+        self._rec_tick()
+        self._rec_tmr.start(1000)
+
+        def run():
+            import sounddevice as sd
+            import speaker
+            try:
+                speaker.recording.set()   # ATLAS must not take the sample as a request
+                try:
+                    pcm = sd.rec(REC_SECONDS * 16000, samplerate=16000, channels=1, dtype="int16", device=dev)
+                    sd.wait()
+                finally:
+                    speaker.recording.clear()
+                out = None if self._rec_cancel else {"pcm": pcm.tobytes(), **speaker.assess(pcm.tobytes())}
+            except Exception as e:
+                out = e
+            try:
+                self._voice_done.emit(out)
+            except RuntimeError:   # panel closed meanwhile
+                pass
+        threading.Thread(target=run, daemon=True).start()
+
+    def _rec_tick(self):
+        if self._rec_left > 0:
+            self._rec.setText(f"■  CANCELAR   ·   {self._rec_left} s")
+            self._rec_left -= 1
+        else:
+            self._rec.setText("ANALIZANDO…")
+            self._rec.setEnabled(False)
+            self._rec_tmr.stop()
+
+    def _voice_result(self, out):
+        import speaker
+        self._rec_tmr.stop()
+        self._rec_left, self._recording = 0, False
+        self._rec.setText("●  GRABAR")
+        self._read.hide()
+        if out is None:
+            self._voice_say("Grabación cancelada.")
+        elif isinstance(out, Exception):
+            self._voice_say(f"Falló la grabación: {out}", True)
+        elif out["vec"] is None:
+            self._voice_say("No se oyó ninguna voz: revisa el micrófono elegido en GENERAL y vuelve a grabar.", True)
+        else:
+            self._take = out
+            info = [f"{_quality(out['quality'])}   ·   {out['speech']:.0f} s de voz"]
+            if out["rms"] < 300:
+                info.append("Volumen bajo: acércate al micrófono.")
+            if out["clipped"] > 0.01:
+                info.append("Sonido saturado: aléjate del micrófono o baja su volumen.")
+            if out["quality"] < 0.4:
+                info.append("Conviene repetirla: lee todo el texto sin ruido de fondo ni otras voces.")
+            name, score = speaker.identify(out["vec"], speaker.profiles(speaker.load()))
+            if name:
+                info.append(f"Reconocida como {name} ({score:.0%}).")
+                self._take_name.setEditText(name)
+            elif score:
+                info.append(f"No coincide con ninguna voz registrada (la más parecida: {score:.0%}).")
+            self._take_info.setText("\n".join(info))
+            self._take_box.show()
+            self._voice_say("Escúchala y guárdala con el nombre de la persona.")
+        self._refresh_voices()
+
+    def _save_take(self):
+        import speaker
+        name = self._take_name.currentText().strip()
+        if not name:
+            self._voice_say("Falta el nombre: escríbelo o elige una voz de la lista.", True)
+            self._take_name.setFocus()
+            return
+        t = self._take
+        n = speaker.add(name, t["vec"], quality=t["quality"], pcm=t["pcm"])
+        self._discard_take()
+        self._voice_say(f"Guardada en la voz de {name} ({_plural(n, 'grabación', 'grabaciones')})."
+                        + (" Graba otra para reconocerla mejor." if n < 3 else ""))
+        self._refresh_voices()
+
+    def _discard_take(self):
+        self._take = None
+        self._take_box.hide()
+        self._take_name.setEditText("")
+        self._voice_say("")
+
+    # ── MOTOR IA tab ─────────────────────────────────────────────────────────
 
     def _build_ai(self, cfg, lay):
         lay.addWidget(_text("Motor", 9, C.TEXT_MED))
@@ -2694,6 +2991,64 @@ class SettingsOverlay(QWidget):
             self._err.setText(f"No se pudo configurar el inicio con el sistema: {e}")
             self._autostart.blockSignals(True); self._autostart.setChecked(not on); self._autostart.blockSignals(False)
 
+    def _set_phone(self, key: str, on: bool, box):
+        from config import update_config
+        try:
+            update_config(**{key: on})
+        except Exception as e:
+            self._err.setText(f"No se pudo guardar el cambio: {e}")
+            box.blockSignals(True); box.setChecked(not on); box.blockSignals(False)
+
+    # ── ACERCA DE tab ─────────────────────────────────────────────────────────
+
+    def _build_about(self, cfg, lay):
+        hero = QFrame()
+        hero.setObjectName("card")
+        h = QVBoxLayout(hero)
+        h.setContentsMargins(22, 22, 22, 22)
+        h.setSpacing(6)
+        for w in (_text("ATLAS", 16, C.PRI, bold=True), _text(f"Versión {VERSION}", 10, C.TEXT_MED)):
+            w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            h.addWidget(w)
+        lay.addWidget(hero)
+
+        _section(lay, "ACTUALIZACIONES")
+        lay.addWidget(_text("ATLAS busca versiones nuevas al iniciar y una vez al día, y avisa en el registro. "
+                            "Nunca instala nada solo: tú ejecutas el instalador nuevo. También puedes "
+                            "pedírselo de voz: «Atlas, busca actualizaciones».", 8, C.TEXT_DIM, wrap=True))
+        lay.addSpacing(4)
+        self._upd = _button("⟳  BUSCAR ACTUALIZACIONES", "outline", self._check_updates, 34)
+        lay.addWidget(self._upd)
+        self._upd_msg = _text("", 9, C.TEXT_MED, wrap=True)
+        self._upd_msg.setOpenExternalLinks(True)   # the download link of a new release
+        lay.addWidget(self._upd_msg)
+        self._upd_done.connect(self._updates_result)
+
+        _section(lay, "CRÉDITOS")
+        lay.addWidget(_text("Desarrollado por Pablo Romero", 10, C.TEXT))
+        lay.addWidget(_button("github.com/pablo29855", "link",
+                              lambda: QDesktopServices.openUrl(QUrl("https://github.com/pablo29855"))),
+                      0, Qt.AlignmentFlag.AlignLeft)
+
+    def _check_updates(self):
+        import updater
+        self._upd.setEnabled(False)
+        self._upd.setText("BUSCANDO…")
+        self._upd_msg.setText("")
+
+        def run():
+            try:
+                self._upd_done.emit(updater.summary(VERSION))
+            except RuntimeError:   # panel closed meanwhile
+                pass
+        threading.Thread(target=run, daemon=True).start()
+
+    def _updates_result(self, msg: str):
+        self._upd.setEnabled(True)
+        self._upd.setText("⟳  BUSCAR ACTUALIZACIONES")
+        msg = re.sub(r"(https://\S+)", rf'<a href="\1" style="color: {C.PRI};">\1</a>', msg)
+        self._upd_msg.setText(msg.replace("\n", "<br>"))
+
     def _stash(self, p: str):
         key = PROVIDERS[p]["key"]
         if key not in (None, "gemini_api_key", "openrouter_api_key"):
@@ -2717,6 +3072,7 @@ class SettingsOverlay(QWidget):
             voice_name=self._voice.currentData(),
             voice_speed=self._speed.currentData(),
             voice_volume=self._volume.value(),
+            speaker_only=self._only.isEnabled() and self._only.isChecked(),
         )
         if self._effort.currentData():
             cfg["effort"] = self._effort.currentData()
@@ -2826,31 +3182,104 @@ class IconButton(QPushButton):
         pen = QPen(qcol(line), 1.5 / k)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
-        g = self.glyph
-        if g == "clip":
-            p.rotate(40); p.translate(0, -1)
-            path = QPainterPath(QPointF(1.5, -3))
-            path.lineTo(1.5, 5);   path.arcTo(QRectF(-1.5, 3.5, 3, 3), 0, -180)
-            path.lineTo(-1.5, -6); path.arcTo(QRectF(-1.5, -9, 6, 6), 180, -180)
-            path.lineTo(4.5, 7);   path.arcTo(QRectF(-3.5, 3, 8, 8), 0, -180)
-            path.lineTo(-3.5, -2)
-            p.drawPath(path)
-        elif g in ("mic", "mic_off"):
-            p.drawRoundedRect(QRectF(-3, -9, 6, 11), 3, 3)
-            p.drawArc(QRectF(-6.5, -6.5, 13, 13), 180 * 16, 180 * 16)
-            p.drawLine(QPointF(0, 6.5), QPointF(0, 9)); p.drawLine(QPointF(-4, 9), QPointF(4, 9))
-            if g == "mic_off":
-                p.drawLine(QPointF(-8, -9), QPointF(8, 9))
-        elif g == "full":
-            for sx in (-1, 1):
-                for sy in (-1, 1):
-                    p.drawPolyline([QPointF(sx * 8, sy * 3), QPointF(sx * 8, sy * 8), QPointF(sx * 3, sy * 8)])
-        elif g == "send":
-            p.drawPolyline([QPointF(-4, -7), QPointF(3, 0), QPointF(-4, 7)])
-            p.drawLine(QPointF(-9, 0), QPointF(3, 0))
-        elif g == "search":
-            p.drawEllipse(QPointF(-2, -2), 6, 6)
-            p.drawLine(QPointF(2.5, 2.5), QPointF(8, 8))
+        _glyph(p, self.glyph)
+
+
+def _glyph(p: QPainter, g: str):
+    """Line glyph in a 36 x 36 box centred on 0,0, with the painter's pen (IconButton, TabButton)."""
+    dot = QBrush(p.pen().color())
+    if g == "clip":
+        p.rotate(40); p.translate(0, -1)
+        path = QPainterPath(QPointF(1.5, -3))
+        path.lineTo(1.5, 5);   path.arcTo(QRectF(-1.5, 3.5, 3, 3), 0, -180)
+        path.lineTo(-1.5, -6); path.arcTo(QRectF(-1.5, -9, 6, 6), 180, -180)
+        path.lineTo(4.5, 7);   path.arcTo(QRectF(-3.5, 3, 8, 8), 0, -180)
+        path.lineTo(-3.5, -2)
+        p.drawPath(path)
+    elif g in ("mic", "mic_off"):
+        p.drawRoundedRect(QRectF(-3, -9, 6, 11), 3, 3)
+        p.drawArc(QRectF(-6.5, -6.5, 13, 13), 180 * 16, 180 * 16)
+        p.drawLine(QPointF(0, 6.5), QPointF(0, 9)); p.drawLine(QPointF(-4, 9), QPointF(4, 9))
+        if g == "mic_off":
+            p.drawLine(QPointF(-8, -9), QPointF(8, 9))
+    elif g == "full":
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                p.drawPolyline([QPointF(sx * 8, sy * 3), QPointF(sx * 8, sy * 8), QPointF(sx * 3, sy * 8)])
+    elif g == "send":
+        p.drawPolyline([QPointF(-4, -7), QPointF(3, 0), QPointF(-4, 7)])
+        p.drawLine(QPointF(-9, 0), QPointF(3, 0))
+    elif g == "search":
+        p.drawEllipse(QPointF(-2, -2), 6, 6)
+        p.drawLine(QPointF(2.5, 2.5), QPointF(8, 8))
+    elif g in ("eye", "eye_off"):
+        path = QPainterPath(QPointF(-10, 0))
+        path.quadTo(0, -9, 10, 0); path.quadTo(0, 9, -10, 0)
+        p.drawPath(path)
+        p.drawEllipse(QPointF(0, 0), 2.6, 2.6)
+        if g == "eye_off":
+            p.drawLine(QPointF(-8, -7), QPointF(8, 7))
+    elif g == "sliders":   # GENERAL: the AJUSTES button's sliders
+        for y, knob in ((-6, -3), (0, 4), (6, -1)):
+            p.drawLine(QPointF(-9, y), QPointF(9, y))
+            p.setBrush(dot); p.drawEllipse(QPointF(knob, y), 2.2, 2.2); p.setBrush(Qt.BrushStyle.NoBrush)
+    elif g == "voice":     # VOCES: a voice print
+        for i, h in enumerate((3, 7, 11, 6, 13, 8, 4)):
+            x = -9 + i * 3
+            p.drawLine(QPointF(x, -h / 2), QPointF(x, h / 2))
+    elif g == "chip":      # MOTOR IA
+        p.drawRoundedRect(QRectF(-6, -6, 12, 12), 1.5, 1.5)
+        p.drawRect(QRectF(-2.5, -2.5, 5, 5))
+        for t in (-3, 0, 3):
+            for a, b in ((QPointF(t, -6), QPointF(t, -9)), (QPointF(t, 6), QPointF(t, 9)),
+                         (QPointF(-6, t), QPointF(-9, t)), (QPointF(6, t), QPointF(9, t))):
+                p.drawLine(a, b)
+    elif g == "user":      # CUENTA
+        p.drawEllipse(QPointF(0, -4), 4, 4)
+        p.drawArc(QRectF(-8, 2, 16, 14), 0, 180 * 16)
+        p.drawLine(QPointF(-8, 9), QPointF(8, 9))
+    elif g == "info":      # ACERCA DE
+        p.drawEllipse(QPointF(0, 0), 9.5, 9.5)
+        p.drawLine(QPointF(0, -1), QPointF(0, 5))
+        p.setBrush(dot); p.drawEllipse(QPointF(0, -4.5), 1, 1); p.setBrush(Qt.BrushStyle.NoBrush)
+    elif g == "memory":    # MEMORIA: a small knowledge graph
+        for a, b in (((-6, 4), (0, -6)), ((0, -6), (6, 4)), ((-6, 4), (6, 4))):
+            p.drawLine(QPointF(*a), QPointF(*b))
+        p.setBrush(dot)
+        for x, y in ((-6, 4), (0, -6), (6, 4)):
+            p.drawEllipse(QPointF(x, y), 2.2, 2.2)
+
+
+class TabButton(QPushButton):
+    """Settings tab: painted line glyph over its name, gold and underlined when selected."""
+
+    def __init__(self, glyph: str, name: str, parent=None):
+        super().__init__(parent)
+        self.glyph, self.name = glyph, name
+        self.setCheckable(True)
+        self.setFixedHeight(60)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        on = self.isChecked()
+        col = qcol(C.PRI if on else C.TEXT_MED if self.underMouse() else C.TEXT_DIM)
+        w, h = self.width(), self.height()
+        p.save()
+        p.translate(w / 2, 20)
+        pen = QPen(col, 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+        _glyph(p, self.glyph)
+        p.restore()
+        f = QFont(_FONT, 8, QFont.Weight.Bold if on else QFont.Weight.Normal)
+        f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1)
+        p.setFont(f); p.setPen(col)
+        p.drawText(QRectF(0, 38, w, 16), Qt.AlignmentFlag.AlignCenter, self.name)
+        if on:
+            p.fillRect(QRectF(0, h - 2, w, 2), col)
 
 
 class HudBox(QWidget):
@@ -2901,6 +3330,7 @@ class MainWindow(QMainWindow):
     _task_sig  = pyqtSignal(str)
     _job_sig   = pyqtSignal(str, str, str)
     _mute_sig  = pyqtSignal(bool)
+    _dance_sig = pyqtSignal(float)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -2972,6 +3402,7 @@ class MainWindow(QMainWindow):
         self._task_sig.connect(self.hud.set_task)
         self._job_sig.connect(self.hud.set_job)
         self._job_sig.connect(self._show_ops)
+        self._dance_sig.connect(lambda secs: setattr(self.hud, "_dance_end", time.time() + secs))
         self._mute_sig.connect(lambda v: v != self._muted and self._toggle_mute())
         self._ai_sig.connect(self._set_ai)
         self._usage_sig.connect(self._add_usage)
@@ -3267,6 +3698,7 @@ class MainWindow(QMainWindow):
             QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
         """)
         self._input.returnPressed.connect(self._send)
+        self._input.installEventFilter(self)   # Ctrl+V of an image
         row.addWidget(self._input)
 
         def _icon(glyph, tip, slot):
@@ -3316,6 +3748,33 @@ class MainWindow(QMainWindow):
             )
             threading.Thread(target=self.on_text_command, args=(msg,), daemon=True).start()
 
+    def eventFilter(self, obj, e):
+        if obj is self._input and e.type() == QEvent.Type.KeyPress and e.matches(QKeySequence.StandardKey.Paste):
+            cb = QApplication.clipboard()
+            # Excel, Word... copy text plus a picture of it: text still pastes as text
+            if not cb.mimeData().hasText() and not (img := cb.image()).isNull():
+                self._on_image_pasted(img)
+                return True
+        return super().eventFilter(obj, e)
+
+    def _on_image_pasted(self, img):
+        """A pasted capture goes to ATLAS like a picked file, but stays in memory (no file on disk)."""
+        from actions.image_vision import keep_pasted
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        img.save(buf, "PNG")
+        data = bytes(buf.data())
+        name, size = keep_pasted(data), _fmt_size(len(data))
+        self._input.setPlaceholderText(f"Imagen pegada · {size} · dile a ATLAS qué hacer con ella")
+        self._log.append_log(f"Archivo: imagen pegada {name} ({size})")
+        if self.on_text_command:
+            msg = (
+                f"[IMAGE_PASTED] path={name} | size={size} | The user pasted an image into the chat; it is "
+                f"kept in memory only, there is no file on disk. To look at it call view_images with "
+                f"paths={name}. Briefly tell the user you got the image and ask what they'd like to know about it."
+            )
+            threading.Thread(target=self.on_text_command, args=(msg,), daemon=True).start()
+
     def _toggle_mute(self):
         self._muted = not self._muted
         self.hud.muted = self._muted
@@ -3346,7 +3805,9 @@ class MainWindow(QMainWindow):
     def _set_ai(self, label: str, model: str):
         self._ai_now = (model, get_effort() or "")
         self._ai_hdr.setText(model or label)
+        from voice import EDGE_VOICES
         voice = self._load_cfg().get("voice_name") or "Charon"
+        voice = EDGE_VOICES.get(voice, voice)
         self._ai_sub.setText(" · ".join(filter(None, (label, _EFFORTS.get(get_effort(), get_effort()), voice))))
         self._ai_sub.setToolTip("Cámbialo en Ajustes › Motor IA  (Ctrl+K)")
 
@@ -3512,6 +3973,10 @@ class AtlasUI:
         """Background job shown in the HUD; goal "" removes it. Thread-safe."""
         self._win._job_sig.emit(key, goal, step)
 
+    def dance(self, secs: float):
+        """The reactor dances for `secs` (0 stops it). Thread-safe."""
+        self._win._dance_sig.emit(float(secs))
+
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
 
@@ -3537,4 +4002,4 @@ class AtlasUI:
         self.set_state("SPEAKING")
 
     def stop_speaking(self):
-        self.set_state("MUTED" if self.muted else "LISTENING")
+        self.set_state("MUTED" if self.muted else "LISTENING")

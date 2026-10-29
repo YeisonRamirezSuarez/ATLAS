@@ -41,6 +41,22 @@ class AtlasIdTabTests(unittest.TestCase):
         self.assertEqual(got[0]["device_name"], "Studio PC")
         self.assertTrue(got[0]["memory_sync"])
 
+    def test_iphone_switches_save_on_toggle_and_save_keeps_them(self):
+        path = Path(tempfile.mkdtemp()) / "api_keys.json"
+        path.write_text(json.dumps({"provider": "gemini", "gemini_api_key": "test-key"}), encoding="utf-8")
+        with mock.patch.object(config, "_CONFIG_PATH", path), mock.patch.object(ui, "API_FILE", path):
+            ov = ui.SettingsOverlay(json.loads(path.read_text()), can_cancel=True)
+            self.assertTrue(all(b.isChecked() for b in ov._phone_sw.values()))   # on until turned off
+            ov._phone_sw["phone_mail"].setChecked(False)
+            ov._phone_sw["phone_siri"].setChecked(False)
+            self.assertEqual({k: v for k, v in json.loads(path.read_text()).items() if k.startswith("phone_")},
+                             {"phone_mail": False, "phone_siri": False})   # live: no SAVE needed
+            got = []
+            ov.done.connect(got.append)
+            ov._submit()
+        self.assertFalse(got[0]["phone_mail"])
+        self.assertFalse(got[0]["phone_siri"])
+
 
 class VoiceTests(unittest.TestCase):
     def test_each_change_previews_and_default_restores_atlas(self):
@@ -49,7 +65,7 @@ class VoiceTests(unittest.TestCase):
         played = []
         with mock.patch("voice.read_aloud", mock.AsyncMock(return_value=b"\x10\x00" * 4)), \
              mock.patch.dict(sys.modules, {"sounddevice": mock.Mock(   # the real one needs a sound server
-                 play=lambda a, sr: played.append(a.tolist()))}), \
+                 play=lambda a, sr, device=None: played.append(a.tolist()))}), \
              mock.patch.object(ui.threading, "Thread", side_effect=lambda target, daemon: mock.Mock(start=target)):
             ov = ui.SettingsOverlay(cfg, can_cancel=True)
             self.assertEqual((ov._voice.currentData(), ov._speed.currentData(), ov._volume.value()), ("Puck", "rapida", 40))
@@ -61,6 +77,17 @@ class VoiceTests(unittest.TestCase):
             ov._submit()
         self.assertEqual(len(played), 2)   # one sample per change, the reset included
         self.assertEqual((got[0]["voice_name"], got[0]["voice_speed"], got[0]["voice_volume"]), ("Charon", "normal", 100))
+
+    def test_hovering_the_open_list_previews_that_voice(self):
+        asked = []
+        with mock.patch("voice.read_aloud", mock.AsyncMock(side_effect=lambda t, v, p: asked.append(v) or b"\x10\x00")), \
+             mock.patch.dict(sys.modules, {"sounddevice": mock.Mock()}), \
+             mock.patch.object(ui.threading, "Thread", side_effect=lambda target, daemon: mock.Mock(start=target)):
+            ov = ui.SettingsOverlay({"provider": "gemini", "gemini_api_key": "k"}, can_cancel=True)
+            ov._hovered = ov._voice.findData("es-MX-DaliaNeural")
+            with mock.patch.object(ov._voice.view(), "isVisible", return_value=True):
+                ov._preview_voice()
+        self.assertEqual(asked, ["es-MX-DaliaNeural"])
 
 
 class ThemeTests(unittest.TestCase):
@@ -267,6 +294,56 @@ class ThemeTests(unittest.TestCase):
             finally:
                 ui.restyle("dark")
                 win.deleteLater()
+
+
+class ChatPasteTests(unittest.TestCase):
+    def setUp(self):
+        path = Path(tempfile.mkdtemp()) / "api_keys.json"
+        path.write_text(json.dumps({"provider": "gemini", "gemini_api_key": "k"}), encoding="utf-8")
+        patches = [mock.patch.object(ui, "API_FILE", path),
+                   mock.patch.object(ui.threading, "Thread",
+                                     side_effect=lambda target, args, daemon: mock.Mock(start=lambda: target(*args)))]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.win = ui.MainWindow("")
+        self.addCleanup(self.win.deleteLater)
+        self.sent = []
+        self.win.on_text_command = self.sent.append
+
+    def _ctrl_v(self, mime):
+        from PyQt6.QtTest import QTest
+        QApplication.clipboard().setMimeData(mime)
+        QTest.keyClick(self.win._input, ui.Qt.Key.Key_V, ui.Qt.KeyboardModifier.ControlModifier)
+
+    def test_pasted_image_is_kept_in_memory_and_announced(self):
+        from PyQt6.QtGui import QColor, QImage
+        from actions import image_vision as iv
+        img = QImage(64, 48, QImage.Format.Format_RGB32)
+        img.fill(QColor("red"))
+        mime = ui.QMimeData()
+        mime.setImageData(img)
+        with mock.patch.dict(iv.PASTED, clear=True), \
+             mock.patch("builtins.open", side_effect=AssertionError("pasting opened a file")):
+            self._ctrl_v(mime)
+            data = iv.PASTED[Path("pasted-1.png")]
+        self.assertTrue(data.startswith(b"\x89PNG"))   # PNG bytes in memory, nothing on disk
+        self.assertEqual(self.win._input.text(), "")
+        self.assertIn("Imagen pegada", self.win._input.placeholderText())
+        self.assertTrue(self.sent[0].startswith("[IMAGE_PASTED] path=pasted-1.png"))
+        self.assertIn("view_images", self.sent[0])
+
+    def test_text_paste_unchanged(self):
+        from PyQt6.QtGui import QImage
+        from actions import image_vision as iv
+        mime = ui.QMimeData()
+        mime.setText("hola")
+        mime.setImageData(QImage(8, 8, QImage.Format.Format_RGB32))   # Excel-style: text plus a picture of it
+        with mock.patch.dict(iv.PASTED, clear=True):
+            self._ctrl_v(mime)
+            self.assertEqual(iv.PASTED, {})
+        self.assertEqual(self.win._input.text(), "hola")
+        self.assertEqual(self.sent, [])
 
 
 if __name__ == "__main__":

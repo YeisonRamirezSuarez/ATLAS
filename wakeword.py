@@ -11,6 +11,7 @@ api_keys.json (all optional):
   "wake_variants":    ["atlas", "atla", "adlas", ...]
   "wake_end_silence": 2.0      # seconds of quiet that end what the user said; raise it for slow speakers
 """
+import functools
 import json
 import time
 from collections import deque
@@ -27,17 +28,29 @@ PRE_ROLL      = 0.3                         # seconds kept before the wake word,
 END_SILENCE   = 31                          # quiet chunks (~2 s) that end what the user said; wake_end_silence
 
 
+def model_path(cfg: dict) -> Path:
+    path = Path(cfg.get("wake_model") or DEFAULT_MODEL)
+    return path if path.is_absolute() else BASE_DIR / path
+
+
+@functools.lru_cache(maxsize=None)
+def vosk_model(path: str):
+    """One copy of the Vosk model per process: the wake word and speaker.py share it."""
+    from vosk import Model, SetLogLevel
+    SetLogLevel(-1)
+    return Model(path)
+
+
 class Detector:
     """Vosk recognizer limited to the wake variants. feed() returns None mid-utterance, then,
     when Vosk closes it, False or the second (since the first chunk fed) the wake word began."""
 
     def __init__(self, model_path: Path, variants: list[str], sensitivity: float):
-        from vosk import KaldiRecognizer, Model, SetLogLevel
-        SetLogLevel(-1)
+        from vosk import KaldiRecognizer
         self.variants = [v.lower().split() for v in variants]
         self.min_conf = 1.0 - min(max(float(sensitivity), 0.0), 1.0)
         grammar = json.dumps([" ".join(v) for v in self.variants] + ["[unk]"])
-        self.rec = KaldiRecognizer(Model(str(model_path)), RATE, grammar)
+        self.rec = KaldiRecognizer(vosk_model(str(model_path)), RATE, grammar)
         self.rec.SetWords(True)
 
     def feed(self, pcm: bytes):
@@ -127,8 +140,7 @@ def make_gate(cfg: dict, log=print):
     if mode is False or str(mode).lower() in ("false", "off", "0"):
         log("SIS: Palabra de activación apagada (wake_word=false); siempre escuchando.")
         return None
-    path = Path(cfg.get("wake_model") or DEFAULT_MODEL)
-    path = path if path.is_absolute() else BASE_DIR / path
+    path = model_path(cfg)
     global END_SILENCE
     try:   # seconds -> 1024-sample chunks at 16 kHz; read before the detector starts using it
         END_SILENCE = max(1, round(float(cfg.get("wake_end_silence", 2.0)) * RATE / 1024))

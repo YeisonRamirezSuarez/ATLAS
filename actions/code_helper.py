@@ -241,6 +241,21 @@ def _run_file(path: Path, args: list, timeout: int) -> str:
         return f"Execution error: {e}"
 
 
+def _risk_question(path: Path) -> str:
+    """Same risk check as solve_task scripts: code that deletes, kills, installs or changes the
+    system runs only after the user's yes. Empty when the file looks safe."""
+    from agent.executor import _risks
+    try:
+        risks = _risks(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError as e:
+        return f"Could not read {path} to check it before running: {e}"
+    if not risks:
+        return ""
+    return (f"NEEDS CONFIRMATION. Nothing ran yet: {path} would {', '.join(sorted(risks))}. Tell the user in one "
+            f"sentence and ask. Only after a clear yes, call code_helper with action='run' file_path='{path}' "
+            "and confirmed='yes'.")
+
+
 def _build(description, language, output_path, args, timeout, speak=None, player=None) -> str:
     if not description:
         return "Please describe what you want me to build, sir."
@@ -264,6 +279,9 @@ def _build(description, language, output_path, args, timeout, speak=None, player
         if player:
             player.write_log(f"[Code] Attempt {attempt}...")
 
+        # The yes is for a file the user heard about: newly written code is always checked, never pre-approved.
+        if question := _risk_question(path):
+            return question
         last_output = _run_file(path, args, timeout)
 
         if not _has_error(last_output):
@@ -371,12 +389,14 @@ Explanation:"""
         return f"Could not explain code: {e}"
 
 
-def _run_action(file_path, args, timeout, player) -> str:
+def _run_action(file_path, args, timeout, player, confirmed=False) -> str:
     if not file_path:
         return "Please provide a file path to run, sir."
     p = Path(file_path)
     if not p.exists():
         return f"File not found: {file_path}"
+    if not confirmed and (question := _risk_question(p)):
+        return question
     if player:
         player.write_log(f"[Code] Running {p.name}...")
     return _run_file(p, args, timeout)
@@ -552,6 +572,7 @@ def code_helper(
     code        = p.get("code", "").strip()
     args        = p.get("args", [])
     timeout     = int(p.get("timeout", 30))
+    confirmed   = str(p.get("confirmed", "")).lower() == "yes" or bool(p.get("_trusted"))
 
     if action == "auto":
         action = _detect_intent(description, file_path, code)
@@ -571,7 +592,7 @@ def code_helper(
         return _explain_action(file_path, code, player)
 
     elif action == "run":
-        return _run_action(file_path, args, timeout, player)
+        return _run_action(file_path, args, timeout, player, confirmed)
 
     elif action == "build":
         return _build(description, language, output_path, args, timeout, speak, player)
@@ -583,4 +604,4 @@ def code_helper(
         return _screen_debug_action(description, file_path, player, speak)
 
     else:
-        return f"Unknown action: '{action}'. Use write, edit, explain, run, build, optimize, or screen_debug."
+        return f"Unknown action: '{action}'. Use write, edit, explain, run, build, optimize, or screen_debug."

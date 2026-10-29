@@ -19,16 +19,20 @@ from collections import deque
 import edge_tts
 import miniaudio
 
+import phone_bridge
+
 from config import PROVIDERS, get_config, get_effort, get_engine
 from main import (ACK, INSTANT_TOOLS, AtlasLive, TOOL_DECLARATIONS, RESUME_RULE, VoiceGate, clean_tail, live_model,
                   speech_config, voice_settings, _ack_lang, _names_itself, _update_memory_async)
-from voice import reader_config
+from voice import EDGE_VOICES, edge_pcm, reader_config
 
 VOICE_RULE = ("\nYour replies are spoken aloud by a TTS voice: plain text only, no markdown, "
-              "no lists, no emojis. One or two short sentences. Never run the same task twice at once.")
+              "no lists, no emojis. One or two short sentences. Never run the same task twice at once."
+              "\nA message may start with [VOICE ID: name]: the voice was recognized as that person, so address "
+              "them by that name. [VOICE ID: unknown] is a voice that is not enrolled: use no enrolled name. "
+              "A voice match is not proof of identity and grants no permission.")
 MAX_ROUNDS  = 25      # tool rounds per request before giving up
 MAX_HISTORY = 40      # messages; then the whole history resets (keeps the cached prefix valid)
-MAX_RESULT  = 2000    # chars of a tool result sent back to the model
 HOLD        = 19200   # bytes (0.4 s) of speech held back until a read ends: clean_tail checks them
 SAME_LANGUAGE = ("Rewrite the Text in the language of the user's words (a locale code like es-ES names it). "
                  "If it is already in that language, return it unchanged. Keep meaning, names and numbers. "
@@ -142,11 +146,15 @@ class _ClaudeSub:
             # User settings may say bypassPermissions: the voice chat keeps the plain mode, so only
             # these tools run (Atlas tools keep their own confirmations).
             permission_mode="default",
-            allowed_tools=["Skill", *(f"mcp__atlas__{d['name']}" for d in TOOL_DECLARATIONS)])
+            allowed_tools=["Skill", *(f"mcp__atlas__{d['name']}" for d in TOOL_DECLARATIONS)],
+            stderr=lambda line: print(f"[Claude CLI] {line}"))   # into atlas.log: why a start hangs
         self.client = ClaudeSDKClient(opts)
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
-        self._call(self.client.connect(), 60)
+        try:
+            self._call(self.client.connect(), 60)
+        except TimeoutError:
+            raise TimeoutError("Claude Code no respondió en 60 s") from None
 
     def _call(self, coro, timeout=None):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
@@ -262,7 +270,7 @@ RESUME = ("[BACKGROUND RESULT] You were interrupted while doing the user's reque
 
 def _tool_text(fut) -> str:
     try:
-        return str((fut.result().response or {}).get("result", ""))[:MAX_RESULT] or "OK"
+        return str((fut.result().response or {}).get("result", "")) or "OK"
     except Exception as e:
         return f"FAILED: {e}"
 
@@ -315,6 +323,7 @@ class _Voice:
 
 
 class CascadeAtlas(AtlasLive):
+    _track_speaker = False   # _handle checks each whole utterance alongside its transcription
 
     def __init__(self, ui):
         super().__init__(ui)
@@ -323,6 +332,8 @@ class CascadeAtlas(AtlasLive):
         self._turn = threading.Lock()   # one exchange at a time; a message typed mid-reply waits its turn
         self._epoch = 0                 # +1 per interruption: replies from an older one stay silent
         self._tts_futs = set()          # speech queued or playing, cancelled on interruption
+        self._taps = []                 # open captures (_capture): each gets a copy of the speech played
+        self._phone = threading.Lock()  # one phone request at a time, so each gets only its own audio
 
     # ---- brain -------------------------------------------------------------
     def _spoke(self, mark=False) -> bool:
@@ -354,16 +365,30 @@ class CascadeAtlas(AtlasLive):
     def _resume(self, request: str, name: str, fut):
         self._handle(text=RESUME.format(request=request[:300], name=name, result=_tool_text(fut)), remember=False)
 
-    def _handle(self, pcm=None, text=None, remember=True):
+    def _handle(self, pcm=None, text=None, remember=True, push=True):
         with self._turn:
             self._busy = True
             try:
                 self._show_state()
+                voice_id = ""
                 if pcm is not None:
-                    text = self._stt(pcm).strip()
+                    import speaker
+                    with concurrent.futures.ThreadPoolExecutor(1) as ex:
+                        found = ex.submit(speaker.who, pcm, self.cfg)   # local, alongside the STT request
+                        text = self._stt(pcm).strip()
                     if not text:
                         return
-                    self.ui.write_log(f"Tú: {text}")
+                    try:
+                        found = found.result()
+                    except Exception as e:   # never worth losing the request over
+                        print(f"[ATLAS] ⚠️ speaker id: {e}")
+                        found = None
+                    name = found and found[0]
+                    if found and not name and self.cfg.get("speaker_only"):
+                        return self._refuse_voice(found[1])
+                    self.ui.write_log(f"Tú ({name}): {text}" if name else f"Tú: {text}")
+                    if found:
+                        voice_id = f"[VOICE ID: {name or 'unknown'}] "
                 if remember:
                     self._last_heard = text   # language background speech is put into
                 self._turn_text = text        # what an interrupted step resumes
@@ -371,12 +396,16 @@ class CascadeAtlas(AtlasLive):
                 epoch = self._epoch
                 voice = self._voice = _Voice(self._say, lambda: epoch == self._epoch,
                                              lambda said: self.ui.write_log(f"Atlas: {said}"))
-                reply, tin, tout = self.llm.ask(text, self._run_tool, voice.end, voice.feed)
-                self.ui.add_usage(tin, tout)
-                voice.end(reply)
-                voice.wait()
+                with self._capture() as heard:   # the iPhone gets the speech the PC played: same voice
+                    reply, tin, tout = self.llm.ask(voice_id + text, self._run_tool, voice.end, voice.feed)
+                    self.ui.add_usage(tin, tout)
+                    voice.end(reply)
+                    voice.wait()
+                if push:
+                    phone_bridge.push(reply, b"".join(heard))
                 if remember:
                     threading.Thread(target=_update_memory_async, args=(text, reply), daemon=True).start()
+                return reply
             except Exception as e:
                 traceback.print_exc()
                 self.ui.write_log(f"ERROR: {str(e)[:160]}")
@@ -387,7 +416,7 @@ class CascadeAtlas(AtlasLive):
                 self._show_state()
 
     def _occupied(self) -> bool:
-        return self._is_speaking or self._busy   # talking, or working on a request
+        return super()._occupied() or self._busy   # talking or dancing, or working on a request
 
     def interrupt(self):
         """Wake word while talking or working, or a typed message: silence now, end the brain's turn,
@@ -406,6 +435,27 @@ class CascadeAtlas(AtlasLive):
             if self._turn.locked() or self._is_speaking:
                 self.interrupt()      # a typed message cuts the current reply
             self._handle(text=text)   # waits for the interrupted one to wrap up
+
+    def phone_ask(self, text: str) -> tuple[str, bytes]:
+        """A request from the iPhone (phone_bridge): handled like a typed one; returns the reply
+        and the speech it produced, which the PC speaker also plays."""
+        with self._phone:
+            self.ui.write_log(f"iPhone: {text}")
+            if self._turn.locked() or self._is_speaking:
+                self.interrupt()
+            with self._capture() as heard:
+                reply = self._handle(text=text, push=False) or ""   # the phone gets it as the answer
+            return reply, b"".join(heard)
+
+    @contextlib.contextmanager
+    def _capture(self):
+        """Collects a copy of every piece of speech played while open."""
+        heard = []
+        self._taps.append(heard)
+        try:
+            yield heard
+        finally:
+            self._taps.remove(heard)
 
     # ---- ears --------------------------------------------------------------
     def _stt_engine(self) -> str:
@@ -460,8 +510,10 @@ class CascadeAtlas(AtlasLive):
 
     async def _tts_now(self, text: str):
         """One voice for everything: a Live session kept open reads each reply (same model and voice as
-        the Gemini Live engine, no reconnect per sentence). edge-tts only when Gemini can't speak at all."""
-        if self.cfg.get("gemini_api_key") and not getattr(self, "_gemini_denied", False):
+        the Gemini Live engine, no reconnect per sentence). edge-tts when an Edge voice is picked, or
+        when Gemini can't speak at all."""
+        voice, pace, _ = voice_settings()
+        if voice not in EDGE_VOICES and self.cfg.get("gemini_api_key") and not getattr(self, "_gemini_denied", False):
             self._tts_sent = False
             for _ in range(2):   # a session the server closed while idle: reconnect once
                 try:
@@ -476,13 +528,12 @@ class CascadeAtlas(AtlasLive):
                         break
                     print(f"[ATLAS] ⚠️ Live voice failed: {str(e)[:200]}")
             print("[ATLAS] ⚠️ Gemini voice unavailable, using edge-tts")
-        mp3 = b"".join([c["data"] async for c in edge_tts.Communicate(
-            text, self.cfg.get("tts_voice", "es-CO-GonzaloNeural")).stream() if c["type"] == "audio"])
-        if not mp3:
+        pcm = await edge_pcm(text, voice if voice in EDGE_VOICES else self.cfg.get("tts_voice", "es-CO-GonzaloNeural"), pace)
+        if not pcm:
             return
-        pcm = miniaudio.decode(mp3, output_format=miniaudio.SampleFormat.SIGNED16,
-                               nchannels=1, sample_rate=24000).samples.tobytes()
         self._turn_done = False
+        for tap in self._taps:
+            tap.append(pcm)
         for i in range(0, len(pcm), 4096):
             self.audio_in_queue.put_nowait(pcm[i:i + 4096])
         self._turn_done = True
@@ -497,6 +548,8 @@ class CascadeAtlas(AtlasLive):
         if pcm:
             self.audio_in_queue.put_nowait(pcm)
             self._tts_sent = True
+            for tap in self._taps:
+                tap.append(pcm)
 
     async def _reader(self):
         """The open Live session that reads replies aloud. Each new session picks a slightly different
@@ -584,7 +637,15 @@ class CascadeAtlas(AtlasLive):
             on_loop = False
         if on_loop:   # translating blocks: never on the event loop
             return threading.Thread(target=self.speak, args=(text,), daemon=True).start()
-        self._say(self._user_language(text))
+        said = self._user_language(text)
+        self.ui.write_log(f"Atlas: {said}")   # nothing is heard that the log doesn't show
+        with self._capture() as heard:
+            self._say(said)
+        phone_bridge.push(said, b"".join(heard))   # reminders and finished tasks reach the iPhone too
+
+    def _say_line(self, line: str):
+        self.ui.write_log(f"Atlas: {line}")
+        self._say(line)
 
     def _user_language(self, text: str) -> str:
         hint = getattr(self, "_last_heard", "") or self.cfg.get("stt_language", "es-ES")
@@ -628,6 +689,10 @@ class CascadeAtlas(AtlasLive):
         self.out_queue      = asyncio.Queue()
         self.ui.set_state("LISTENING")
         self.ui.write_log(f"SIS: ATLAS en línea. Motor={info['label']} ({model}). STT={self._stt_engine()}.")
+        try:
+            phone_bridge.attach(self, int(self.cfg.get("phone_port", 8765)))
+        except Exception as e:   # port taken or blocked: ATLAS still works on the PC
+            self.ui.write_log(f"SIS: Puente iPhone no arrancó ({str(e)[:120]}).")
         if boot := self._boot_prompt():
             threading.Thread(target=self._handle, kwargs={"text": boot, "remember": False}, daemon=True).start()
         async with asyncio.TaskGroup() as tg:

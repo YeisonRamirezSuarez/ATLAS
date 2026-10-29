@@ -128,7 +128,7 @@ class ReActTests(unittest.TestCase):
                 raise r
             return r
 
-        def fake_tool(tool, params, speak):
+        def fake_tool(tool, params, speak, **kw):
             calls.append((tool, params))
             out = tools.get(tool, "ok")
             if isinstance(out, Exception):
@@ -137,7 +137,8 @@ class ReActTests(unittest.TestCase):
 
         with mock.patch.object(llm, "complete_json", side_effect=fake_llm), \
              mock.patch.object(executor, "_call_tool", side_effect=fake_tool), \
-             mock.patch.object(memory_manager, "load_memory", return_value={}):
+             mock.patch.object(memory_manager, "load_memory", return_value={}), \
+             mock.patch.object(memory_manager, "find_skills", return_value=[]):
             result = executor.AgentExecutor().execute("the goal", speak=spoken.append,
                                                       cancel_flag=cancel, on_step=steps.append)
         return result, prompts, calls, spoken, steps
@@ -195,16 +196,77 @@ class ReActTests(unittest.TestCase):
     def test_risky_script_asks_and_stops(self):
         result, prompts, _, spoken, _ = self.run_agent(
             [{"thought": "delete", "actions": [{"tool": "generated_code", "parameters": {"description": "rm"}}]}],
-            tools={"generated_code": executor.NeedsConfirmation("NEEDS CONFIRMATION. ask")})
-        self.assertEqual((len(prompts), result), (1, "NEEDS CONFIRMATION. ask"))
+            tools={"generated_code": executor.NeedsConfirmation("NEEDS CONFIRMATION. ask", what="delete x")})
+        self.assertEqual(len(prompts), 1)
+        self.assertTrue(result.startswith("NEEDS CONFIRMATION. The background task wants to delete x."), result)
+        self.assertIn("action='resume' and confirmed='yes'", result)
 
 
 class ExecutorTests(unittest.TestCase):
+    real_find_failures = staticmethod(memory_manager.find_failures)
+
+    def setUp(self):
+        for name in ("find_failures", "save_failure"):
+            p = mock.patch.object(memory_manager, name, return_value=[])
+            self.addCleanup(p.stop)
+            setattr(self, name, p.start())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = mock.patch.object(memory_manager, "SKILL_LOG", Path(tmp.name) / "decisions.jsonl")   # not the user's log
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_final_failure_is_remembered_and_shown_to_the_next_try(self):
+        seen = []
+        self.find_failures.return_value = ["copy x: Tried: robocopy | Error: access denied"]
+        with mock.patch.object(executor, "_write_script",
+                               side_effect=lambda *a, **kw: seen.append(kw) or "# PLAN: copy it\nprint(1)"), \
+             mock.patch.object(executor, "_run_script", return_value=(False, "Traceback\nPermissionError: no")), \
+             mock.patch.object(executor, "_research", return_value=""), \
+             mock.patch.object(memory_manager, "find_skills", return_value=[]):
+            with self.assertRaises(RuntimeError):
+                executor.solve_task("copy x")
+        self.assertEqual(seen[0]["past_failures"], self.find_failures.return_value)
+        self.save_failure.assert_called_once_with("copy x", "copy it", "Traceback\nPermissionError: no")
+
+    def test_find_failures_parses_engram_episodes(self):
+        out = ("Found 1 memories:\n\n[1] #12 (episode) — failed: copy x\n"
+               "    Tried: robocopy | Error: access denied\n    2026-10-29 | project: p | scope: project\n")
+        with mock.patch.object(memory_manager, "_engram", return_value=out):
+            self.assertEqual(self.real_find_failures("copy x"),
+                             ["copy x: Tried: robocopy | Error: access denied"])
+
     def test_checked_never_reports_empty_as_success(self):
         self.assertIn("not verified", executor._checked("open_app", ""))
         self.assertEqual(executor._checked("open_app", "Opened Chrome."), "Opened Chrome.")
         with self.assertRaises(RuntimeError):
             executor._checked("open_app", "Could not find Chrome.")
+
+    def test_saved_skill_runs_as_is_without_rewriting_it(self):
+        skill = "# PLAN: turn bluetooth off\nprint('off')\n# VERIFIED: 2026-10-29 on Windows"
+        prompts, ran = [], []
+        answers = iter(["REUSE 1", "# PLAN: other way\nprint('off')"])
+        with mock.patch.object(llm, "complete", side_effect=lambda p, **kw: prompts.append(p) or next(answers)), \
+             mock.patch.object(executor, "_run_script",
+                               side_effect=lambda c: ran.append(c) or ((False, "boom") if len(ran) == 1 else (True, "off"))), \
+             mock.patch.object(executor, "_research", return_value=""), \
+             mock.patch.object(memory_manager, "find_skills", return_value=[("turn bluetooth off", skill)]), \
+             mock.patch.object(memory_manager, "save_skill") as save:
+            self.assertEqual(executor.solve_task("turn bluetooth off"), "off")
+        self.assertEqual(ran[0], skill)              # the saved script, unchanged
+        self.assertIn("REUSE", prompts[0])
+        self.assertNotIn("REUSE", prompts[1])        # it failed: not offered as-is again
+        save.assert_called_once()                    # the new way that worked is learned
+
+    def test_same_skill_is_not_saved_twice(self):
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(memory_manager, "SKILLS_DIR", Path(d)), \
+             mock.patch.object(memory_manager, "_engram_save_async") as engram:
+            memory_manager.save_skill("bt off", "plan", "print('off')")
+            memory_manager.save_skill("turn bt off", "plan", "print('off')\n")
+            memory_manager.save_skill("bt on", "plan", "print('on')")
+            self.assertEqual(len(list(Path(d).glob("*.py"))), 2)
+        self.assertEqual(engram.call_count, 2)
 
     def test_dangerous_patterns(self):
         for code in ("subprocess.run(['pip', 'install', 'x'])", "os.system('rm -rf /tmp/x')",
@@ -260,7 +322,7 @@ class ExecutorTests(unittest.TestCase):
         results = iter([(False, "ModuleNotFoundError: x"), (False, "boom"), (True, "done")])
         seen = []
 
-        def write(goal, skills, failed, research=""):
+        def write(goal, skills, failed, research="", **kw):
             seen.append(research)
             return "# PLAN: print\nprint(1)"
         with mock.patch.object(executor, "_write_script", side_effect=write), \
@@ -282,10 +344,12 @@ class TaskQueueTests(unittest.TestCase):
         from agent.task_queue import TaskQueue
 
         class Exec:
-            def execute(self, goal, speak, cancel_flag, on_step):
+            def execute(self, goal, speak, cancel_flag, on_step, **kw):
                 on_step("1/2 web_search: find it")
                 return "done"
-        q, seen = TaskQueue(), []
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        q, seen = TaskQueue(path=Path(tmp.name) / "tasks.json"), []
         q._executor, q.on_change = Exec(), lambda *a: seen.append(a)
         tid = q.submit("find flights")
         q._run_task(q._tasks[tid])
@@ -299,10 +363,28 @@ class MemoryTests(unittest.TestCase):
         self.path = Path(self.dir.name) / "long_term.json"
         self.patch = mock.patch.object(memory_manager, "MEMORY_PATH", self.path)
         self.patch.start()
+        self.log = mock.patch.object(memory_manager, "SKILL_LOG", Path(self.dir.name) / "decisions.jsonl")
+        self.log.start()
 
     def tearDown(self):
         self.patch.stop()
+        self.log.stop()
         self.dir.cleanup()
+
+    def test_pending_is_loaded_once_and_stale_ones_dropped(self):
+        with mock.patch.object(memory_manager, "PENDING_PATH", Path(self.dir.name) / "pending.json"):
+            memory_manager.save_pending("", [])
+            self.assertIsNone(memory_manager.load_pending())   # nothing to keep: no file written
+            memory_manager.save_pending("• check the agents\n\n", ["cómo vas"])
+            data = memory_manager.load_pending()
+            self.assertEqual((data["items"], data["requests"]), (["check the agents"], ["cómo vas"]))
+            self.assertIsNone(memory_manager.load_pending())
+            memory_manager.save_pending("old task")
+            raw = json.loads(memory_manager.PENDING_PATH.read_text(encoding="utf-8"))
+            raw["saved"] = "2020-01-01T00:00:00"
+            memory_manager.PENDING_PATH.write_text(json.dumps(raw), encoding="utf-8")
+            self.assertIsNone(memory_manager.load_pending())
+            self.assertEqual(memory_manager.format_pending_for_prompt(None), "")
 
     def test_save_load_roundtrip(self):
         mem = memory_manager._empty_memory()
@@ -320,6 +402,22 @@ class MemoryTests(unittest.TestCase):
         for f in memory_manager.BUILTIN_SKILLS_DIR.glob("*.py"):
             self.assertNotIn(home, f.read_text(encoding="utf-8").lower(), f.name)
 
+    def test_skills_ranked_by_words_shared_with_the_goal_not_by_date(self):
+        skills = Path(self.dir.name) / "skills"
+        skills.mkdir()
+        hits = []
+        for i, task in enumerate(("Turn off the Bluetooth radio on this Windows 11 PC",
+                                  "Turn off the Bluetooth radio on this Windows 11 PC",
+                                  "Change the Windows 11 system accent color to green")):
+            (skills / f"s{i}.py").write_text(f"# PLAN: {task}\nprint(1)\n", encoding="utf-8")
+            hits.append(f"[{i}] #{i} (skill) — skill: {task}\n    file: s{i}.py\n")
+        with mock.patch.object(memory_manager, "SKILLS_DIR", skills), \
+             mock.patch.object(memory_manager, "_engram", return_value="".join(hits[:2])):   # older one past the cap
+            found = memory_manager.find_skills("Change the Windows 11 accent color to blue")
+            self.assertEqual([t for t, _ in found], ["Change the Windows 11 system accent color to green"])
+            found = memory_manager.find_skills("Turn the Bluetooth radio off")
+            self.assertEqual(len(found), 1)   # the same code saved twice comes back once
+
     def test_saved_skill_records_verification_and_keeps_old_versions(self):
         with mock.patch.object(memory_manager, "SKILLS_DIR", Path(self.dir.name) / "skills"), \
              mock.patch.object(memory_manager, "_engram_save_async") as engram, \
@@ -327,7 +425,7 @@ class MemoryTests(unittest.TestCase):
             from datetime import datetime
             for second in (1, 2):
                 clock.now.return_value = datetime(2026, 10, 23, 10, 0, second)
-                memory_manager.save_skill("show ram", "# PLAN: print ram", "# PLAN: print ram\nprint(1)")
+                memory_manager.save_skill("show ram", "# PLAN: print ram", f"# PLAN: print ram\nprint({second})")
             files = sorted((Path(self.dir.name) / "skills").glob("*.py"))
         self.assertEqual(len(files), 2)
         lines = files[0].read_text(encoding="utf-8").splitlines()
@@ -425,6 +523,28 @@ class MainToolResultTests(unittest.TestCase):
         self.assertTrue(h("send_message", "Could not open WhatsApp").startswith("FAILED"))
         self.assertEqual(h("send_message", "Message sent."), "Message sent.")
 
+    def test_dance_without_the_song_still_dances_and_says_so(self):
+        j = self.main.AtlasLive.__new__(self.main.AtlasLive)
+        j.ui, j._is_speaking = mock.Mock(), False
+        with mock.patch.object(self.main, "CHAPA_CLIP", Path("missing.mp3")):
+            out = j._dance()
+        self.assertIn("no music", out)
+        j.ui.dance.assert_called_once_with(30.0)
+        self.assertTrue(j._occupied())   # the mic waits for the wake word while it dances
+
+    def test_dance_plays_the_shipped_song(self):
+        j = self.main.AtlasLive.__new__(self.main.AtlasLive)
+        j.ui = mock.Mock()
+        with mock.patch.object(self.main.sd, "play") as play:
+            out = j._dance()
+        self.assertEqual(out, "Dancing for 30 s.")
+        self.assertEqual(play.call_args.args[0].shape[1], 2)
+
+    def test_long_result_is_clipped_with_a_note(self):
+        n = self.main.MAX_RESULT
+        self.assertEqual(self.main.clip("x" * n), "x" * n)
+        self.assertTrue(self.main.clip("x" * (n + 5)).endswith("[5 more chars cut]"))
+
     def test_tool_timeouts_cover_default(self):
         self.assertIn("default", self.main.TOOL_TIMEOUTS)
 
@@ -453,9 +573,36 @@ class MainToolResultTests(unittest.TestCase):
                 raise e
             spoke.append(text)
         j._live_tts = live
-        with mock.patch.object(engines.edge_tts, "Communicate", side_effect=AssertionError("voice changed")):
+        with mock.patch.object(engines, "voice_settings", return_value=("Charon", "", 1.0)), \
+             mock.patch.object(engines, "edge_pcm", side_effect=AssertionError("voice changed")):
             asyncio.run(j._tts_now("hola"))
         self.assertEqual(spoke, ["hola"])
+
+    def test_edge_voice_never_touches_gemini(self):
+        import asyncio, engines
+        j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
+        j.cfg, j.audio_in_queue, j._taps = {"gemini_api_key": "k"}, asyncio.Queue(), []
+        j._live_tts = mock.AsyncMock(side_effect=AssertionError("Gemini used"))
+        edge = mock.AsyncMock(return_value=b"\0" * 10)
+        with mock.patch.object(engines, "voice_settings", return_value=("es-MX-JorgeNeural", "", 1.0)), \
+             mock.patch.object(engines, "edge_pcm", edge):
+            asyncio.run(j._tts_now("hola"))
+        edge.assert_awaited_once_with("hola", "es-MX-JorgeNeural", "")
+
+    def test_edge_retries_a_turn_with_no_audio(self):
+        import asyncio, edge_tts, miniaudio, voice
+        tries = []
+
+        class Communicate:   # the first turn ends with no audio, like the service now and then does
+            def __init__(self, *a, **k): tries.append(a)
+            async def stream(self):
+                if len(tries) == 1:
+                    raise edge_tts.exceptions.NoAudioReceived("No audio was received.")
+                yield {"type": "audio", "data": b"mp3"}
+        with mock.patch.object(edge_tts, "Communicate", Communicate), \
+             mock.patch.object(miniaudio, "decode", return_value=mock.Mock(samples=mock.Mock(tobytes=lambda: b"pcm"))):
+            self.assertEqual(asyncio.run(voice.edge_pcm("hola", "es-MX-JorgeNeural")), b"pcm")
+        self.assertEqual(len(tries), 2)
 
     def test_interrupted_read_keeps_the_same_live_session(self):
         import asyncio, contextlib, engines, numpy as np
@@ -483,6 +630,7 @@ class MainToolResultTests(unittest.TestCase):
 
         j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
         j._tts_client = NS(aio=NS(live=NS(connect=lambda **kw: Session())))
+        j._taps = []
 
         async def go():
             j.audio_in_queue = asyncio.Queue()
@@ -530,13 +678,23 @@ class MainToolResultTests(unittest.TestCase):
     def test_background_speech_follows_user_language(self):
         import engines
         j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
-        j.cfg, j._loop, j._last_heard, said = {}, None, "pon música", []
-        j._say = said.append
-        with mock.patch("agent.llm.complete", return_value="Ajustando mi enfoque, señor.") as c:
+        j.cfg, j._loop, j._last_heard, j._taps, said = {}, None, "pon música", [], []
+
+        def say(text):   # what the PC speaker plays reaches every open capture
+            said.append(text)
+            for tap in j._taps:
+                tap.append(b"pcm")
+        j._say = say
+        j.ui = mock.Mock()
+        with mock.patch("agent.llm.complete", return_value="Ajustando mi enfoque, señor.") as c, \
+                mock.patch.object(engines.phone_bridge, "push") as push:
             j.speak("Adjusting my approach, sir.")
         self.assertEqual(said, ["Ajustando mi enfoque, señor."])
+        j.ui.write_log.assert_called_with("Atlas: Ajustando mi enfoque, señor.")   # what is heard is logged
         self.assertIn("pon música", c.call_args.args[0])
-        with mock.patch("agent.llm.complete", side_effect=RuntimeError("offline")):
+        push.assert_called_once_with("Ajustando mi enfoque, señor.", b"pcm")   # the iPhone gets the same voice
+        with mock.patch("agent.llm.complete", side_effect=RuntimeError("offline")), \
+                mock.patch.object(engines.phone_bridge, "push"):
             j.speak("Task cancelled, sir.")   # translation down: still speaks
         self.assertEqual(said[-1], "Task cancelled, sir.")
 
@@ -569,7 +727,7 @@ class MainToolResultTests(unittest.TestCase):
         import threading, engines
         j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
         j._loop, j._busy, j._turn, j._wake, j._is_speaking = mock.MagicMock(), False, threading.Lock(), None, False
-        j._epoch, j._tts_futs = 0, set()
+        j._epoch, j._tts_futs, j._taps = 0, set(), []
         j.ui, speaking, heard = mock.MagicMock(muted=False), threading.Event(), []
 
         def ask(text, run_tool, say, feed=None):
@@ -580,7 +738,7 @@ class MainToolResultTests(unittest.TestCase):
             return "", 0, 0
         j.llm = mock.MagicMock(ask=ask)
         t = threading.Thread(target=j._on_text_command, args=("first",))
-        with mock.patch.object(engines, "_update_memory_async"):
+        with mock.patch.object(engines, "_update_memory_async"), mock.patch.object(engines.phone_bridge, "push"):
             t.start(); speaking.wait(2)
             j._on_text_command("second")
             t.join()
@@ -631,6 +789,32 @@ class MainToolResultTests(unittest.TestCase):
         cascade._voice.end("Lo busco ahora mismo, señor.")
         cascade._acknowledge("web_search")
         self.assertEqual(said[1:], ["Lo busco ahora mismo, señor."])
+
+    def test_ignored_voice_is_told_once_a_minute_on_every_engine(self):
+        import engines
+        m = self.main
+        line = m.REFUSE_VOICE[m._ack_lang()]
+        # Live: the tracker dropped an unknown voice ("speaker_only"); the brain reads the line out
+        live = m.AtlasLive.__new__(m.AtlasLive)
+        live.ui, live._speaker, live.speak = mock.Mock(), mock.Mock(out=print), mock.Mock()
+        live._on_speaker(None, 0.3, False)
+        live._on_speaker(None, 0.2, False)   # a TV keeps talking: logged, not said again
+        live.speak.assert_called_once()
+        self.assertIn(line, live.speak.call_args.args[0])
+        self.assertEqual(live.ui.write_log.call_count, 2)
+        live._refused_at -= m.REFUSE_EVERY
+        live._on_speaker(None, 0.3, False)
+        self.assertEqual(live.speak.call_count, 2)
+        # cascade: said in its own voice, and the request never reaches the brain
+        j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
+        j.cfg, j.ui, j._turn, j._wake = {"speaker_only": True}, mock.Mock(), threading.Lock(), None
+        j._stt, j._say, j.llm, j._show_state = (lambda pcm: "apaga el PC"), mock.Mock(), mock.Mock(), mock.Mock()
+        import speaker
+        with mock.patch.object(speaker, "who", return_value=(None, 0.3)):
+            j._handle(pcm=b"\0" * 32000)
+            j._handle(pcm=b"\0" * 32000)
+        j._say.assert_called_once_with(line)
+        j.llm.ask.assert_not_called()
 
     def test_gemini_voice_still_works_after_a_reply(self):
         import engines
@@ -687,6 +871,7 @@ class MainToolResultTests(unittest.TestCase):
 
         j = engines.CascadeAtlas.__new__(engines.CascadeAtlas)
         j._tts_client = NS(aio=NS(live=NS(connect=lambda **kw: Session())))
+        j._taps = []
 
         async def go():
             j.audio_in_queue = asyncio.Queue()
@@ -868,9 +1053,58 @@ class MainToolResultTests(unittest.TestCase):
             with mock.patch.object(m.sys, "argv", ["atlas.pyw", "--autostart"]):
                 self.assertIn("computer just started", j._boot_prompt())
 
+    def test_pending_items_survive_a_restart(self):
+        m = self.main
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(memory_manager, "PENDING_PATH", Path(d) / "pending.json"):
+            # before the restart: the brain's list and the user's latest messages are saved
+            j = m.AtlasLive.__new__(m.AtlasLive)
+            j.ui = mock.Mock()
+            m._session_requests.clear()
+            m._update_memory_async("cómo va la vending machine", "")
+            with mock.patch("actions.code_agent.running", return_value=[]), \
+                 mock.patch("ui.relaunch") as relaunch, mock.patch.object(m.threading, "Timer") as timer:
+                j._self_improve({"action": "restart",
+                                 "pending": "- review the VendigMachine transcript and tell me how it goes\n"
+                                            "always answer in Spanish"})
+            relaunch.assert_called_once()
+            timer.assert_called_once()   # the exit is scheduled, not run here
+            # after it: a new ATLAS loads them once, into the boot turn and the first system prompts
+            new = m.AtlasLive.__new__(m.AtlasLive)
+            known = {"identity": {"name": {"value": "Pablo"}}}
+            with mock.patch.object(m, "load_memory", return_value=known), \
+                 mock.patch.object(m.sys, "argv", ["atlas.pyw"]):
+                boot = new._boot_prompt()
+                self.assertIn("You just restarted", boot)
+                self.assertIn("review the VendigMachine transcript", boot)
+                self.assertIn("cómo va la vending machine", boot)
+                self.assertFalse(memory_manager.PENDING_PATH.exists())   # consumed: a later start won't repeat it
+                with mock.patch.object(m, "recent_memories", return_value=""), \
+                     mock.patch.object(m, "_load_system_prompt", return_value="RULES"):
+                    prompts = [new._system_text() for _ in range(m.PENDING_TURNS + 1)]
+            self.assertIn("[PENDING FROM BEFORE THE RESTART", prompts[0])
+            self.assertIn("always answer in Spanish", prompts[m.PENDING_TURNS - 1])
+            self.assertNotIn("PENDING FROM BEFORE", prompts[-1])   # only for the first turns
+
     def test_task_status_tool_declared(self):
         names = {t["name"] for t in self.main.TOOL_DECLARATIONS}
         self.assertIn("task_status", names)
+
+    def test_agent_tools_match_the_brain_tools(self):
+        """The task agent's hand-written tool list must not drift from TOOL_DECLARATIONS or the code."""
+        import ast
+        import re
+        decl = {t["name"]: set(t.get("parameters", {}).get("properties", {})) for t in self.main.TOOL_DECLARATIONS}
+        root = Path(__file__).resolve().parent.parent
+        for tool, (mod, fn, _) in executor._TOOLS.items():
+            src = (root / (mod.replace(".", "/") + ".py")).read_text(encoding="utf-8")
+            self.assertIn(fn, {n.name for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)}, tool)
+        for tool in [*executor._TOOLS, "screen_process"]:
+            self.assertIn(tool, decl, tool)
+            block = re.search(rf"^{tool}\b.*\n((?:  .*\n)*)", executor.REACT_PROMPT, re.M)
+            self.assertTrue(block, f"{tool} missing from REACT_PROMPT")
+            params = set(re.findall(r"^  (\w+):", block.group(1), re.M))
+            self.assertLessEqual(params, decl[tool], tool)
 
 
 class AutostartTests(unittest.TestCase):

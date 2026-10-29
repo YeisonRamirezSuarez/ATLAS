@@ -1,6 +1,4 @@
 """Updater: data backup/restore, migrations on a version change, release check (network mocked)."""
-import io
-import json
 import sys
 import tempfile
 import unittest
@@ -59,19 +57,23 @@ class DataTests(unittest.TestCase):
 
 
 class CheckTests(unittest.TestCase):
-    def reply(self, tag):
-        return mock.patch.object(updater.urllib.request, "urlopen",
-                                 lambda req, timeout: io.BytesIO(json.dumps(
-                                     {"tag_name": tag, "html_url": "https://x/r"}).encode()))
+    def reply(self, url):
+        page = mock.MagicMock()
+        page.__enter__.return_value.geturl.return_value = url
+        return mock.patch.object(updater.urllib.request, "urlopen", lambda req, timeout: page)
 
     def test_off_without_repo(self):
         self.assertIn("apagada", updater.check("2.0.0", None))
 
     def test_newer_and_same(self):
-        with self.reply("v2.10.0"):
+        with self.reply("https://github.com/o/r/releases/tag/v2.10.0"):
             self.assertIn("Actualización disponible: v2.10.0", updater.check("2.9.9", "o/r"))
-        with self.reply("2.0.0"):
+        with self.reply("https://github.com/o/r/releases/tag/2.0.0"):
             self.assertIn("está al día", updater.check("2.0.0", "o/r"))
+
+    def test_no_release_yet(self):
+        with self.reply("https://github.com/o/r/releases"):
+            self.assertIn("ninguna versión publicada", updater.check("2.0.0", "o/r"))
 
     def test_network_error_is_a_failure(self):
         with mock.patch.object(updater.urllib.request, "urlopen", side_effect=OSError("offline")):

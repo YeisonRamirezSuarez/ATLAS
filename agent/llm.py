@@ -29,12 +29,40 @@ def describe() -> str:
     return f"{provider}/{GEMINI_TEXT[False] if provider == 'gemini' else model}"
 
 
-def complete(prompt: str, system: str = "", fast: bool = False, max_tokens: int = 2048) -> str:
+def role_engine(role: str | None) -> tuple[str, str] | None:
+    """(provider, model) the user assigned to a background role in api_keys.json, e.g.
+    "role_models": {"agent": {"provider": "claude", "model": "claude-haiku-5-5"}, "coder": {...}}.
+    Opt-in only: without it every role uses the selected engine, as before."""
+    try:
+        r = (get_config().get("role_models") or {}).get(role or "") or {}
+    except Exception:
+        return None
+    p = r.get("provider") if isinstance(r, dict) else None
+    if p not in PROVIDERS:
+        return None
+    return p, r.get("model") or (GEMINI_TEXT[False] if p == "gemini" else PROVIDERS[p]["model"])
+
+
+def complete(prompt: str, system: str = "", fast: bool = False, max_tokens: int = 2048, role: str | None = None) -> str:
+    t0 = time.monotonic()
+    try:
+        text, used = _complete(prompt, system, fast, max_tokens, role)
+    except Exception as e:
+        print(f"[LLM] ❌ {role or 'text'} failed after {time.monotonic() - t0:.1f}s: {str(e)[:200]}")
+        raise
+    print(f"[LLM] {role or 'text'} → {used} ({time.monotonic() - t0:.1f}s)")
+    return text
+
+
+def _complete(prompt: str, system: str, fast: bool, max_tokens: int, role: str | None) -> tuple[str, str]:
     provider, model = get_engine()
+    override = role_engine(role)
     # FAST switch in the side panel: off = quick helper calls think as deep as the rest.
     fast = fast and get_config().get("fast", True)
-    # Only an effort the user picked; quick helper calls keep the model's default depth.
-    effort = None if fast else get_effort(default=False)
+    # Only an effort the user picked (for the selected engine); quick helper calls keep the model's default depth.
+    effort = None if fast or (override and override[0] != provider) else get_effort(default=False)
+    if override:
+        provider, model = override
     spec = PROVIDERS[provider]
     key = (get_config().get(spec["key"]) or "").strip() if spec["key"] else ""
     if spec["key"] and not key:
@@ -43,8 +71,10 @@ def complete(prompt: str, system: str = "", fast: bool = False, max_tokens: int 
     if provider == "gemini":
         from google import genai
         from google.genai import types
-        model = GEMINI_TEXT[fast]
-        r = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=TIMEOUT * 1000)).models.generate_content(
+        model = model if override else GEMINI_TEXT[fast]
+        # Kept in a variable: a temporary Client is collected and closes its connection before the request.
+        client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=TIMEOUT * 1000))
+        r = client.models.generate_content(
             model=model, contents=prompt,
             config=types.GenerateContentConfig(system_instruction=system or None, max_output_tokens=max_tokens))
         text = r.text
@@ -72,7 +102,7 @@ def complete(prompt: str, system: str = "", fast: bool = False, max_tokens: int 
     text = (text or "").strip()
     if not text:
         raise LLMError(f"{provider}/{model} returned an empty answer")
-    return text
+    return text, f"{provider}/{model}"
 
 
 SKILL_SOURCES = ["user", "project"]   # ~/.claude (never CLAUDE_CONFIG_DIR, see config) + <cwd>/.claude
@@ -117,6 +147,10 @@ def subscription_options(system: str, model: str, persist: bool = False, **kw):
     call used to leave one, so they piled up as chats). Self-improvement keeps its own."""
     import os
     from claude_agent_sdk import ClaudeAgentOptions
+    # The SDK's `claude -v` probe gives up after 2 s (the CLI takes ~4 s to start here) and then
+    # waits on the killed probe with no limit: inside ATLAS that wait never ended, so no brain.
+    # The CLI ships with the SDK, so the version it checks always matches.
+    os.environ["CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"] = "1"
     env = {k: "" for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN") if os.environ.get(k)}
     # Optional long-lived token from `claude setup-token`; otherwise the `claude auth login` session.
     token = (get_config().get("claude_oauth_token") or "").strip()
@@ -193,8 +227,8 @@ def strip_fences(text: str) -> str:
     return re.sub(r"```(?:json|python)?", "", text).strip().rstrip("`").strip()
 
 
-def complete_json(prompt: str, system: str = "", fast: bool = False, max_tokens: int = 2048):
+def complete_json(prompt: str, system: str = "", fast: bool = False, max_tokens: int = 2048, role: str | None = None):
     """complete() parsed as JSON; raises ValueError (json.JSONDecodeError) on bad output."""
-    text = strip_fences(complete(prompt, system, fast, max_tokens))
+    text = strip_fences(complete(prompt, system, fast, max_tokens, role=role))
     m = re.search(r"[\[{].*[\]}]", text, re.S)   # models sometimes wrap JSON in a sentence
     return json.loads(m.group(0) if m else text)

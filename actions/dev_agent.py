@@ -19,6 +19,7 @@ PROJECTS_DIR     = Path.home() / "Desktop" / "AtlasProjects"
 MAX_FIX_ATTEMPTS = 5
 MODEL_PLANNER    = "gemini-flash-latest"
 MODEL_WRITER     = "gemini-flash-latest"
+RUN_FILE         = ".atlas_run.json"   # how to run a project again after the user's yes
 
 def _get_api_key() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -241,25 +242,38 @@ def _venv_python(project_dir: Path) -> str:
         subprocess.run([base, "-m", "venv", str(venv)], check=True, capture_output=True, timeout=180)
     return str(py)
 
+# A package name with optional extras and versions: no options, URLs or paths reach pip.
+_DEP = re.compile(r"[A-Za-z0-9][\w.\-]*(\[[\w,.\-]+\])?(\s*[<>=!~]=?\s*[\w.*+\-]+\s*,?)*")
+
+
+def _dep_ok(dep: str) -> bool:
+    return bool(_DEP.fullmatch(str(dep).strip()))
+
+
+def _missing_dependencies(dependencies: list[str], project_dir: Path) -> list[str]:
+    """The packages not yet in the project's venv: installing one runs its code, so the user says yes first."""
+    py = _venv_python(project_dir)
+    missing = []
+    for dep in dependencies:
+        pkg_name = re.split(r"[>=<!~\[]", dep)[0].strip()
+        if subprocess.run([py, "-m", "pip", "show", pkg_name], capture_output=True, text=True).returncode != 0:
+            missing.append(dep)
+        else:
+            print(f"[DevAgent] ✓ Already installed: {pkg_name}")
+    return missing
+
+
 def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
     if not dependencies:
         return "No external dependencies."
+    skipped = [d for d in dependencies if not _dep_ok(d)]
+    if skipped:
+        print(f"[DevAgent] Skipped, not a package name: {skipped}")
     try:
         py = _venv_python(project_dir)
+        to_install = _missing_dependencies([d for d in dependencies if _dep_ok(d)], project_dir)
     except Exception as e:
         return f"Could not create the project venv, dependencies not installed: {e}"
-
-    to_install = []
-    for dep in dependencies:
-        pkg_name = re.split(r"[>=<!]", dep)[0].strip()
-        result = subprocess.run(
-            [py, "-m", "pip", "show", pkg_name],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            to_install.append(dep)
-        else:
-            print(f"[DevAgent] ✓ Already installed: {pkg_name}")
 
     if not to_install:
         return f"All dependencies already installed: {', '.join(dependencies)}"
@@ -335,7 +349,8 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
         return f"Run error: {e}"
 
 def _try_auto_install(error_output: str, project_dir: Path) -> bool:
-    """ModuleNotFoundError varsa eksik paketi otomatik kurmaya çalışır."""
+    """ModuleNotFoundError: adds the missing package to the project's dependencies. It is installed
+    only after the user's yes (action='run'), never on its own: a guessed name can be a typosquat."""
     pattern = re.compile(
         r"No module named ['\"]([a-zA-Z0-9_\-\.]+)['\"]", re.IGNORECASE
     )
@@ -344,17 +359,13 @@ def _try_auto_install(error_output: str, project_dir: Path) -> bool:
         return False
 
     pkg = match.group(1).replace("_", "-").split(".")[0]
-    print(f"[DevAgent] 🔧 Auto-installing missing package: {pkg}")
-    try:
-        result = subprocess.run(
-            [_venv_python(project_dir), "-m", "pip", "install", pkg],
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=60, cwd=str(project_dir)
-        )
-        return result.returncode == 0
-    except Exception:
+    info = json.loads((project_dir / RUN_FILE).read_text(encoding="utf-8"))
+    if pkg in info.setdefault("dependencies", []):
         return False
+    print(f"[DevAgent] 🔧 Missing package, waiting for the user's yes: {pkg}")
+    info["dependencies"].append(pkg)
+    (project_dir / RUN_FILE).write_text(json.dumps(info), encoding="utf-8")
+    return True
 
 def _fix_files(
     error_output: str,
@@ -447,6 +458,51 @@ Fixed code for {fix_path}:"""
 
     return updated_codes
 
+def _risk_question(project_dir: Path) -> str:
+    """Same risk check as solve_task scripts, over the project's files and its run command:
+    code that deletes, kills, installs or changes the system runs only after the user's yes.
+    Empty when it looks safe."""
+    from agent.executor import _risks
+    info = json.loads((project_dir / RUN_FILE).read_text(encoding="utf-8"))
+    code = [info.get("run_command", "")]
+    for name in info.get("files", []):
+        try:
+            code.append((project_dir / name).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    risks = _risks("\n".join(code))
+    deps = [d for d in info.get("dependencies", []) if _dep_ok(d)]
+    try:
+        missing = _missing_dependencies(deps, project_dir)
+    except Exception:
+        missing = deps
+    parts = ([f"run code that would {', '.join(sorted(risks))}"] if risks else []) + \
+            ([f"install from PyPI {', '.join(missing)} (installing runs their code)"] if missing else [])
+    if not parts:
+        return ""
+    return (f"NEEDS CONFIRMATION. Nothing ran or was installed yet: the project in {project_dir} needs the user's "
+            f"yes to {' and '.join(parts)}. Tell the user in one sentence and ask. Only after a clear yes, call dev_agent with "
+            f"action='run' project_name='{project_dir.name}' and confirmed='yes'.")
+
+
+def _run_existing(project_name: str, timeout: int, confirmed: bool) -> str:
+    """Runs a project dev_agent built before, once: the path a yes to a risky project takes."""
+    project_dir = PROJECTS_DIR / re.sub(r"[^\w\-]", "_", project_name)
+    try:
+        info = json.loads((project_dir / RUN_FILE).read_text(encoding="utf-8"))
+        question = "" if confirmed else _risk_question(project_dir)
+    except (OSError, ValueError):
+        return f"FAILED: no project built by ATLAS at {project_dir}."
+    if question:
+        return question
+    if info.get("dependencies"):
+        print(f"[DevAgent] {_install_dependencies(info['dependencies'], project_dir)}")
+    output = _run_project(info["run_command"], project_dir, timeout)
+    if _has_error(output, info["run_command"]):
+        return f"FAILED: the project in {project_dir} ran with errors.\n\n{output}"
+    return f"Project in {project_dir} ran.\n\n{output}"
+
+
 def _build_project(
     description: str,
     language: str,
@@ -526,6 +582,14 @@ def _build_project(
         if speak: speak(msg)
         return msg
 
+    (project_dir / RUN_FILE).write_text(json.dumps(
+        {"run_command": run_command, "files": list(file_codes), "dependencies": dependencies}), encoding="utf-8")
+    # Freshly written code is never pre-approved: risky code waits, and the yes runs these exact files.
+    if question := _risk_question(project_dir):
+        log("Risky code: waiting for the user's yes before installing or running anything.")
+        if speak: speak(question.split(". Tell the user")[0])
+        return question
+
     if dependencies:
         install_result = _install_dependencies(dependencies, project_dir)
         log(install_result)
@@ -537,6 +601,8 @@ def _build_project(
 
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
         log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
+        if attempt > 1 and (question := _risk_question(project_dir)):   # a fix can add risky code
+            return question
         last_output = _run_project(run_command, project_dir, timeout)
         log(f"Output preview: {last_output[:150]}")
 
@@ -559,11 +625,11 @@ def _build_project(
 
         error_type = _classify_error(last_output)
         if error_type == "dependency_error" and auto_installs < 3:
-            installed = _try_auto_install(last_output, project_dir)
-            if installed:
+            if _try_auto_install(last_output, project_dir):
                 auto_installs += 1
-                log("Missing dependency installed, retrying...")
-                time.sleep(1)
+                if question := _risk_question(project_dir):
+                    log("Missing dependency: waiting for the user's yes before installing it.")
+                    return question
                 continue
 
         log(f"Fixing errors (type: {error_type})...")
@@ -606,6 +672,12 @@ def dev_agent(
     language     = p.get("language", "python").strip()
     project_name = p.get("project_name", "").strip()
     timeout      = int(p.get("timeout", 30))
+    confirmed    = str(p.get("confirmed", "")).lower() == "yes" or bool(p.get("_trusted"))
+
+    if str(p.get("action", "")).lower() == "run":
+        if not project_name:
+            return "Please tell me which project to run, sir."
+        return _run_existing(project_name, timeout, confirmed)
 
     if not description:
         return "Please describe the project you want me to build, sir."
@@ -617,4 +689,4 @@ def dev_agent(
         timeout      = timeout,
         speak        = speak,
         player       = player,
-    )
+    )
